@@ -140,6 +140,8 @@ Complete AWS solution for deploying an Apache Flink 1.20 streaming application u
    sdk install java 11.0.28-amzn
    sdk use java 11.0.28-amzn
    ```
+   
+   > **⚠️ CRITICAL:** You must run `sdk use java 11.0.28-amzn` in **every new shell/terminal session** before running Maven commands or building the application. The `./setup-env.sh` and `./cicd.sh` scripts do this automatically.
 
 4. **jq** (for JSON parsing)
    ```bash
@@ -189,6 +191,12 @@ Complete AWS solution for deploying an Apache Flink 1.20 streaming application u
 
 ## Quick Start
 
+> **⚠️ IMPORTANT:** Every time you open a new shell/terminal, you must set Java 11:
+> ```bash
+> sdk use java 11.0.28-amzn
+> ```
+> Or run `./setup-env.sh` to initialize the environment automatically.
+
 ### 1. Clone and Setup Environment
 
 ```bash
@@ -197,10 +205,12 @@ cd datahose-app
 ```
 
 This script:
-- Initializes SDKMAN and Java 11
+- Initializes SDKMAN and Java 11 (run this in every new shell session!)
 - Loads Flink configuration
 - Sets up AWS region from your CLI profile
 - Displays available commands
+
+**Note:** The `cicd.sh` script automatically initializes Java 11, but for manual Maven commands, always ensure Java 11 is active first.
 
 ### 2. Create Infrastructure
 
@@ -755,22 +765,41 @@ aws configure set region us-east-2
 
 ### Java Version Issues
 
-**Symptom:** Build fails with Java version errors
+**Symptom:** Build fails with Java version errors or "wrong version" messages
 
 **Diagnosis:**
 ```bash
 java -version
 # Should show: openjdk version "11.x.x"
+
+# Check which Java is being used
+which java
 ```
 
 **Fix:**
 ```bash
-# Use SDKMAN to set Java 11
+# RECOMMENDED: Use SDKMAN to set Java 11 (required in EVERY new shell session)
 sdk use java 11.0.28-amzn
 
-# Or set JAVA_HOME manually
-export JAVA_HOME=/path/to/java11
+# Verify it's set correctly
+java -version
+
+# Alternative: Set JAVA_HOME manually
+export JAVA_HOME=$(dirname $(dirname $(which java)))
+
+# OR: Run the setup script which does this automatically
+./setup-env.sh
 ```
+
+**Prevention:**
+- **Always run `sdk use java 11.0.28-amzn` when opening a new terminal**
+- Or add this to your `~/.bashrc` or `~/.zshrc`:
+  ```bash
+  # Auto-initialize SDKMAN and Java 11
+  export SDKMAN_DIR="$HOME/.sdkman"
+  [[ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]] && source "$SDKMAN_DIR/bin/sdkman-init.sh"
+  sdk use java 11.0.28-amzn 2>/dev/null
+  ```
 
 ### Maven Build Fails
 
