@@ -1,5 +1,14 @@
 package org.muralis.datahose;
 
+// For AWS Managed Flink runtime property loading
+
+import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
+
+import java.io.IOException;
+import java.time.Duration;
+import java.util.Map;
+import java.util.Properties;
+
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.serialization.SimpleStringEncoder;
@@ -16,20 +25,13 @@ import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.time.Duration;
-import java.util.Map;
-import java.util.Properties;
-
-// For AWS Managed Flink runtime property loading
-import com.amazonaws.services.kinesisanalytics.runtime.KinesisAnalyticsRuntime;
-
 /**
  * Streaming Application - reads from Kinesis Data Stream, transforms to uppercase, and writes to S3
  */
 public class StreamingApp {
 
     private static final Logger LOG = LoggerFactory.getLogger(StreamingApp.class);
-    
+
     // S3 output path will be determined dynamically
     private static String getS3OutputPath() {
         // 1. Try application properties (AWS Managed Flink)
@@ -50,7 +52,8 @@ public class StreamingApp {
         String bucket = System.getenv("DATA_BUCKET");
         String table = System.getenv("S3_TABLE");
         if (bucket != null && !bucket.isEmpty()) {
-            if (table == null || table.isEmpty()) table = "datafall";
+            if (table == null || table.isEmpty())
+                table = "datafall";
             return "s3://" + bucket + "/" + table;
         }
         throw new RuntimeException("S3 output bucket not found in application properties or environment variable DATA_BUCKET");
@@ -58,13 +61,11 @@ public class StreamingApp {
 
     public static void main(String[] args) throws Exception {
         LOG.info("Starting Flink Streaming Application - MINIMAL TEST VERSION");
-        
-        // Set up the streaming execution environment
+
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        
         // NOTE: Checkpointing is handled by AWS Managed Flink automatically
         LOG.info("Environment configured");
-        
+
         // --- DYNAMIC KINESIS STREAM ARN LOADING ---
         String streamArn = null;
         String region = "us-east-2";
@@ -76,7 +77,7 @@ public class StreamingApp {
                 region = kinesisProps.getProperty("aws.region", region);
                 LOG.info("Loaded Kinesis Stream ARN from application properties: {}", streamArn);
             }
-        } catch (Exception e) {
+        } catch (IOException e) {
             LOG.warn("Could not load application properties from KinesisAnalyticsRuntime: {}", e.getMessage());
         }
         // Fallback: try environment variable
@@ -88,8 +89,8 @@ public class StreamingApp {
                 throw new RuntimeException("Kinesis Stream ARN not found in application properties or environment variable KINESIS_STREAM_ARN");
             }
         }
-    String s3OutputPath = getS3OutputPath();
-    LOG.info("S3 Output Path: {}", s3OutputPath);
+        String s3OutputPath = getS3OutputPath();
+        LOG.info("S3 Output Path: {}", s3OutputPath);
 
         // Create properties for Kinesis source configuration
         Properties kinesisProperties = new Properties();
@@ -97,44 +98,29 @@ public class StreamingApp {
         kinesisProperties.setProperty("aws.region", region);
 
         // Create Kinesis Data Streams source with proper configuration
-        KinesisStreamsSource<String> kinesisSource = KinesisStreamsSource.<String>builder()
+        KinesisStreamsSource<String> kinesisSource = KinesisStreamsSource.<
+                        String
+                        >builder()
                 .setStreamArn(streamArn)
                 .setSourceConfig(Configuration.fromMap(Maps.fromProperties(kinesisProperties)))
                 .setDeserializationSchema(new SimpleStringSchema())
                 .build();
 
         // Read from Kinesis Data Stream with explicit TypeInformation
-        DataStream<String> inputStream = env.fromSource(
-            kinesisSource,
-            WatermarkStrategy.noWatermarks(),
-            "Kinesis Data Stream Source",
-            TypeInformation.of(String.class)
-        );
-        
-        // Transform data to uppercase
-        DataStream<String> transformedStream = inputStream.map(new MapFunction<String, String>() {
-            @Override
-            public String map(String value) throws Exception {
-                return value.toUpperCase();
-            }
-        }).name("Transform to Uppercase");
-        
+        DataStream<String> inputStream = env.fromSource(kinesisSource,WatermarkStrategy.noWatermarks(),"Kinesis Data Stream Source",TypeInformation.of(String.class));
 
-        // Configure S3 sink with rolling policy
-        FileSink<String> s3Sink = FileSink
-            .forRowFormat(
-                new Path(s3OutputPath),
-                new SimpleStringEncoder<String>("UTF-8")
-            )
-            .withRollingPolicy(
-                DefaultRollingPolicy.builder()
-                    .withRolloverInterval(Duration.ofMinutes(2))
-                    .withInactivityInterval(Duration.ofSeconds(30))
-                    .build()
-            )
-            .build();
+        // Transform data to uppercase
+        DataStream<String> transformedStream = inputStream.map((MapFunction<String, String>) String::toUpperCase).name("Transform to Uppercase");
+
+        // Configure S3 sink with rolling policy. The Sink Rolling Policy specific rules for when to stop writing to one file and start a new one.
+        // In this case, we are using a simple policy that starts writing to a new file every 2 minutes or if there is no activity for 30 seconds.
+        //  If the sink doesn't receive any new data for 30 seconds, it will close the current file. This is useful to prevent files from staying open for
+        //  a long time if your data stream has quiet periods.
+        FileSink<String> s3Sink = FileSink.forRowFormat(new Path(s3OutputPath),new SimpleStringEncoder<String>("UTF-8"))
+                .withRollingPolicy(DefaultRollingPolicy.builder().withRolloverInterval(Duration.ofMinutes(2)).withInactivityInterval(Duration.ofSeconds(30)).build())
+                .build();
 
         transformedStream.sinkTo(s3Sink).name("S3 File Sink");
-        env.execute("Kinesis to S3 Uppercase Transformation");
+        env.execute("Kinesis to S3 - Uppercase Transformation");
     }
 }
