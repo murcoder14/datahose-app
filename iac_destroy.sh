@@ -33,8 +33,17 @@ log_error() {
 
 # Configuration
 APP_NAME="datahose-app"
-STREAMING_APP_BUCKET="tm-streaming-app-bucket-20251010"
-DATA_BUCKET="tm-data-bucket-20251010"
+# Auto-detect latest dynamic S3 buckets by prefix and creation date
+# Load bucket names from environment or config file
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$DATA_BUCKET" ]; then
+    if [ -f "/tmp/flink-config.env" ]; then
+        source /tmp/flink-config.env
+    fi
+fi
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$DATA_BUCKET" ]; then
+    echo -e "${RED}[ERROR]${NC} STREAMING_APP_BUCKET and/or DATA_BUCKET not set. Please export them or source /tmp/flink-config.env from your deployment before running this script."
+    exit 1
+fi
 KINESIS_STREAM_NAME="tm-input-stream"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
