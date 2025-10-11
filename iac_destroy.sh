@@ -35,6 +35,7 @@ log_error() {
 APP_NAME="datahose-app"
 STREAMING_APP_BUCKET="tm-streaming-app-bucket-20251010"
 DATA_BUCKET="tm-data-bucket-20251010"
+KINESIS_STREAM_NAME="tm-input-stream"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -43,6 +44,7 @@ if [ -z "$REGION" ]; then
 fi
 IAM_ROLE_NAME="${APP_NAME}-flink-role"
 IAM_POLICY_NAME="${APP_NAME}-flink-policy"
+USER_POLICY_NAME="${APP_NAME}-kinesis-producer-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
 
 log_warn "=============================================="
@@ -52,8 +54,10 @@ echo ""
 log_warn "Resources to be deleted:"
 echo "  - S3 Bucket: ${STREAMING_APP_BUCKET} (and all contents)"
 echo "  - S3 Bucket: ${DATA_BUCKET} (and all contents)"
+echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
 echo "  - IAM Role: ${IAM_ROLE_NAME}"
-echo "  - IAM Policy: ${IAM_POLICY_NAME}"
+echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
+echo "  - IAM Policy (Producer): ${USER_POLICY_NAME}"
 echo "  - CloudWatch Log Group: ${LOG_GROUP_NAME}"
 echo "  - Flink Application: ${APP_NAME}"
 echo ""
@@ -220,7 +224,46 @@ delete_s3_bucket() {
 delete_s3_bucket "${STREAMING_APP_BUCKET}"
 delete_s3_bucket "${DATA_BUCKET}"
 
-# Detach and delete IAM policy
+# Delete Kinesis Data Stream
+log_info "Deleting Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
+if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
+    aws kinesis delete-stream \
+        --stream-name "${KINESIS_STREAM_NAME}" \
+        --region "${REGION}" 2>&1
+    log_info "Kinesis stream deleted successfully."
+else
+    log_warn "Kinesis stream ${KINESIS_STREAM_NAME} not found. Skipping..."
+fi
+
+# Detach user policy from sunny0524 and delete user policy
+USER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${USER_POLICY_NAME}"
+
+log_info "Detaching user policy from sunny0524..."
+if aws iam get-user --user-name sunny0524 &> /dev/null; then
+    aws iam detach-user-policy \
+        --user-name sunny0524 \
+        --policy-arn "${USER_POLICY_ARN}" 2>/dev/null || log_warn "Policy may not be attached."
+    log_info "Policy detached from user."
+else
+    log_warn "User sunny0524 not found."
+fi
+
+log_info "Deleting user IAM policy: ${USER_POLICY_NAME}..."
+if aws iam get-policy --policy-arn "${USER_POLICY_ARN}" &> /dev/null; then
+    # Delete all non-default versions first
+    VERSIONS=$(aws iam list-policy-versions --policy-arn "${USER_POLICY_ARN}" --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text 2>/dev/null)
+    for VERSION in $VERSIONS; do
+        aws iam delete-policy-version --policy-arn "${USER_POLICY_ARN}" --version-id "${VERSION}" 2>/dev/null || true
+    done
+    
+    # Delete the policy
+    aws iam delete-policy --policy-arn "${USER_POLICY_ARN}" 2>&1
+    log_info "User IAM policy deleted."
+else
+    log_warn "User IAM policy ${USER_POLICY_NAME} not found. Skipping..."
+fi
+
+# Detach and delete IAM policy for Flink
 POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${IAM_POLICY_NAME}"
 
 log_info "Detaching IAM policy from role..."
@@ -282,7 +325,8 @@ log_info "=============================================="
 echo ""
 log_info "All resources have been removed:"
 echo "  ✓ S3 Buckets deleted"
-echo "  ✓ IAM Role and Policy deleted"
+echo "  ✓ Kinesis Data Stream deleted"
+echo "  ✓ IAM Role and Policies deleted"
 echo "  ✓ CloudWatch Log Group deleted"
 echo "  ✓ Flink Application deleted"
 echo ""

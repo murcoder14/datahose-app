@@ -19,9 +19,11 @@ log_section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 
 # Configuration
 APP_NAME="${APP_NAME:-datahose-app}"
-STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET:-tm-streaming-app-bucket-20251010}"
-DATA_BUCKET="${DATA_BUCKET:-tm-data-bucket-20251010}"
+# Auto-detect latest dynamic S3 buckets by prefix and creation date
+STREAMING_APP_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-streaming-app-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
+DATA_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-data-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
 TABLE_NAME="datafall"
+KINESIS_STREAM_NAME="${KINESIS_STREAM_NAME:-tm-input-stream}"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -29,6 +31,7 @@ if [ -z "$REGION" ]; then
     exit 1
 fi
 IAM_ROLE_NAME="${APP_NAME}-flink-role"
+USER_POLICY_NAME="${APP_NAME}-kinesis-producer-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
 
 echo "╔════════════════════════════════════════════════════════╗"
@@ -57,22 +60,24 @@ fi
 # Check S3 Buckets
 log_section "S3 Buckets"
 
-if aws s3 ls "s3://${STREAMING_APP_BUCKET}" &> /dev/null; then
+if [ -n "${STREAMING_APP_BUCKET}" ] && aws s3 ls "s3://${STREAMING_APP_BUCKET}" &> /dev/null; then
     log_info "Application bucket exists: ${STREAMING_APP_BUCKET}"
-    JAR_COUNT=$(aws s3 ls "s3://${STREAMING_APP_BUCKET}/" --region "${REGION}" | grep -c ".jar" || echo "0")
+    JAR_COUNT=$(aws s3 ls "s3://${STREAMING_APP_BUCKET}/" --region "${REGION}" | awk '{print $4}' | grep -c ".jar$" || echo "0")
     log_info "JAR files in bucket: ${JAR_COUNT}"
+    if [ "$JAR_COUNT" -gt 0 ]; then
+        echo "    Recent JAR(s):"
+        aws s3 ls "s3://${STREAMING_APP_BUCKET}/" --region "${REGION}" | grep ".jar$" | tail -3 | sed 's/^/    /'
+    fi
 else
     log_error "Application bucket not found: ${STREAMING_APP_BUCKET}"
 fi
 
-if aws s3 ls "s3://${DATA_BUCKET}" &> /dev/null; then
+if [ -n "${DATA_BUCKET}" ] && aws s3 ls "s3://${DATA_BUCKET}" &> /dev/null; then
     log_info "Data bucket exists: ${DATA_BUCKET}"
-    
     if aws s3 ls "s3://${DATA_BUCKET}/${TABLE_NAME}/" &> /dev/null; then
         log_info "Table folder exists: ${TABLE_NAME}"
         FILE_COUNT=$(aws s3 ls "s3://${DATA_BUCKET}/${TABLE_NAME}/" --recursive --region "${REGION}" | wc -l)
         log_info "Files in table: ${FILE_COUNT}"
-        
         if [ ${FILE_COUNT} -gt 0 ]; then
             echo ""
             echo "    Recent files:"
@@ -83,6 +88,28 @@ if aws s3 ls "s3://${DATA_BUCKET}" &> /dev/null; then
     fi
 else
     log_error "Data bucket not found: ${DATA_BUCKET}"
+fi
+
+# Check Kinesis Data Stream
+log_section "Kinesis Data Stream"
+
+if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
+    log_info "Kinesis stream exists: ${KINESIS_STREAM_NAME}"
+    
+    STREAM_STATUS=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamStatus' --output text)
+    SHARD_COUNT=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.Shards | length(@)' --output text)
+    STREAM_ARN=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamARN' --output text)
+    
+    if [ "${STREAM_STATUS}" == "ACTIVE" ]; then
+        log_info "Stream status: ${STREAM_STATUS} ✓"
+    else
+        log_warn "Stream status: ${STREAM_STATUS}"
+    fi
+    
+    log_info "Shard count: ${SHARD_COUNT}"
+    log_info "Stream ARN: ${STREAM_ARN}"
+else
+    log_error "Kinesis stream not found: ${KINESIS_STREAM_NAME}"
 fi
 
 # Check IAM Role
@@ -97,6 +124,25 @@ if aws iam get-role --role-name "${IAM_ROLE_NAME}" &> /dev/null; then
     log_info "Attached policies: ${POLICY_COUNT}"
 else
     log_error "IAM Role not found: ${IAM_ROLE_NAME}"
+fi
+
+# Check user policy for Kinesis producer
+USER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${USER_POLICY_NAME}"
+if aws iam get-policy --policy-arn "${USER_POLICY_ARN}" &> /dev/null; then
+    log_info "User policy exists: ${USER_POLICY_NAME}"
+    
+    # Check if attached to user sunny0524
+    if aws iam get-user --user-name sunny0524 &> /dev/null; then
+        if aws iam list-attached-user-policies --user-name sunny0524 --query "AttachedPolicies[?PolicyArn=='${USER_POLICY_ARN}']" --output text | grep -q "${USER_POLICY_NAME}"; then
+            log_info "Policy attached to user sunny0524 ✓"
+        else
+            log_warn "Policy NOT attached to user sunny0524"
+        fi
+    else
+        log_warn "User sunny0524 not found"
+    fi
+else
+    log_warn "User policy not found: ${USER_POLICY_NAME}"
 fi
 
 # Check CloudWatch Logs
@@ -161,11 +207,13 @@ fi
 # Summary
 log_section "Summary"
 
-TOTAL_CHECKS=6
+TOTAL_CHECKS=8
 PASSED=0
 
 aws s3 ls "s3://${STREAMING_APP_BUCKET}" &> /dev/null && ((PASSED++))
 aws s3 ls "s3://${DATA_BUCKET}" &> /dev/null && ((PASSED++))
+aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null && ((PASSED++))
+[ "${STREAM_STATUS}" == "ACTIVE" ] && ((PASSED++))
 aws iam get-role --role-name "${IAM_ROLE_NAME}" &> /dev/null && ((PASSED++))
 aws logs describe-log-groups --log-group-name-prefix "${LOG_GROUP_NAME}" --region "${REGION}" | grep -q "${LOG_GROUP_NAME}" && ((PASSED++))
 aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" --region "${REGION}" &> /dev/null && ((PASSED++))
@@ -181,9 +229,11 @@ if [ ${PASSED} -eq ${TOTAL_CHECKS} ]; then
     echo "Useful commands:"
     echo "  - View live logs: aws logs tail ${LOG_GROUP_NAME} --follow --region ${REGION}"
     echo "  - List output: aws s3 ls s3://${DATA_BUCKET}/${TABLE_NAME}/ --recursive --region ${REGION}"
+    echo "  - Monitor Kinesis: aws kinesis describe-stream --stream-name ${KINESIS_STREAM_NAME} --region ${REGION}"
+    echo "  - Send test data: ./test.sh"
     echo "  - Stop app: aws kinesisanalyticsv2 stop-application --application-name ${APP_NAME} --region ${REGION}"
     exit 0
-elif [ ${PASSED} -ge 4 ]; then
+elif [ ${PASSED} -ge 5 ]; then
     log_warn "System partially operational. Review warnings above."
     exit 0
 else

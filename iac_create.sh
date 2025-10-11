@@ -25,10 +25,16 @@ log_error() {
 }
 
 # Configuration
+# Generate date and epoch suffix for unique bucket names
+DATE_SUFFIX=$(date +%Y%m%d)
+EPOCH_SUFFIX=$(date +%s)
+BUCKET_SUFFIX="${DATE_SUFFIX}-${EPOCH_SUFFIX}"
+
 APP_NAME="datahose-app"
-STREAMING_APP_BUCKET="tm-streaming-app-bucket-20251010"
-DATA_BUCKET="tm-data-bucket-20251010"
+STREAMING_APP_BUCKET="tm-streaming-app-bucket-${BUCKET_SUFFIX}"
+DATA_BUCKET="tm-data-bucket-${BUCKET_SUFFIX}"
 TABLE_NAME="datafall"
+KINESIS_STREAM_NAME="tm-input-stream"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -37,6 +43,7 @@ if [ -z "$REGION" ]; then
 fi
 IAM_ROLE_NAME="${APP_NAME}-flink-role"
 IAM_POLICY_NAME="${APP_NAME}-flink-policy"
+USER_POLICY_NAME="${APP_NAME}-kinesis-producer-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
 LOG_STREAM_NAME="flink-application"
 
@@ -104,6 +111,26 @@ aws s3api put-object \
 
 log_info "S3 table ${TABLE_NAME} structure created in bucket ${DATA_BUCKET}."
 
+# Create Kinesis Data Stream
+log_info "Creating Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
+if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
+    log_warn "Kinesis stream ${KINESIS_STREAM_NAME} already exists."
+    STREAM_ARN=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamARN' --output text)
+else
+    aws kinesis create-stream \
+        --stream-name "${KINESIS_STREAM_NAME}" \
+        --shard-count 1 \
+        --region "${REGION}"
+    
+    log_info "Waiting for stream to become active..."
+    aws kinesis wait stream-exists \
+        --stream-name "${KINESIS_STREAM_NAME}" \
+        --region "${REGION}"
+    
+    STREAM_ARN=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamARN' --output text)
+    log_info "Kinesis stream created successfully: ${STREAM_ARN}"
+fi
+
 # Create CloudWatch Log Group
 log_info "Creating CloudWatch Log Group: ${LOG_GROUP_NAME}..."
 if aws logs describe-log-groups --log-group-name-prefix "${LOG_GROUP_NAME}" --region "${REGION}" | grep -q "${LOG_GROUP_NAME}"; then
@@ -161,8 +188,8 @@ else
     log_info "IAM role created successfully: ${ROLE_ARN}"
 fi
 
-# Create IAM policy document
-log_info "Creating IAM policy document..."
+# Create IAM policy document for Flink application
+log_info "Creating IAM policy document for Flink application..."
 cat > /tmp/flink-policy.json <<EOF
 {
   "Version": "2012-10-17",
@@ -202,6 +229,26 @@ cat > /tmp/flink-policy.json <<EOF
       "Resource": [
         "arn:aws:s3:::${DATA_BUCKET}",
         "arn:aws:s3:::${DATA_BUCKET}/*"
+      ]
+    },
+    {
+      "Sid": "ReadFromKinesisStream",
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:DescribeStream",
+        "kinesis:GetShardIterator",
+        "kinesis:GetRecords",
+        "kinesis:ListShards",
+        "kinesis:SubscribeToShard",
+        "kinesis:DescribeStreamSummary",
+        "kinesis:RegisterStreamConsumer",
+        "kinesis:DeregisterStreamConsumer",
+        "kinesis:ListStreamConsumers",
+        "kinesis:DescribeStreamConsumer"
+      ],
+      "Resource": [
+        "arn:aws:kinesis:${REGION}:${ACCOUNT_ID}:stream/${KINESIS_STREAM_NAME}",
+        "arn:aws:kinesis:${REGION}:${ACCOUNT_ID}:stream/${KINESIS_STREAM_NAME}/*"
       ]
     },
     {
@@ -282,8 +329,69 @@ aws iam attach-role-policy \
 
 log_info "Policy attached successfully."
 
+# Create IAM policy for user sunny0524 to write to Kinesis
+log_info "Creating IAM policy for Kinesis producer (user sunny0524)..."
+cat > /tmp/kinesis-producer-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "WriteToKinesisStream",
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:PutRecord",
+        "kinesis:PutRecords",
+        "kinesis:DescribeStream",
+        "kinesis:ListShards"
+      ],
+      "Resource": [
+        "arn:aws:kinesis:${REGION}:${ACCOUNT_ID}:stream/${KINESIS_STREAM_NAME}"
+      ]
+    }
+  ]
+}
+EOF
+
+USER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${USER_POLICY_NAME}"
+
+if aws iam get-policy --policy-arn "${USER_POLICY_ARN}" &> /dev/null; then
+    log_warn "User policy ${USER_POLICY_NAME} already exists. Creating a new version..."
+    
+    # Delete old versions if there are too many
+    VERSIONS=$(aws iam list-policy-versions --policy-arn "${USER_POLICY_ARN}" --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text)
+    for VERSION in $VERSIONS; do
+        aws iam delete-policy-version --policy-arn "${USER_POLICY_ARN}" --version-id "${VERSION}" || true
+    done
+    
+    # Create new version
+    aws iam create-policy-version \
+        --policy-arn "${USER_POLICY_ARN}" \
+        --policy-document file:///tmp/kinesis-producer-policy.json \
+        --set-as-default
+else
+    USER_POLICY_ARN=$(aws iam create-policy \
+        --policy-name "${USER_POLICY_NAME}" \
+        --policy-document file:///tmp/kinesis-producer-policy.json \
+        --description "Policy for user sunny0524 to write to Kinesis stream ${KINESIS_STREAM_NAME}" \
+        --query 'Policy.Arn' \
+        --output text)
+    log_info "User policy created successfully: ${USER_POLICY_ARN}"
+fi
+
+# Attach policy to user sunny0524
+log_info "Attaching policy to user sunny0524..."
+if aws iam get-user --user-name sunny0524 &> /dev/null; then
+    aws iam attach-user-policy \
+        --user-name sunny0524 \
+        --policy-arn "${USER_POLICY_ARN}" 2>&1 || log_warn "Policy may already be attached to user"
+    log_info "Policy attached to user sunny0524 successfully."
+else
+    log_warn "User sunny0524 not found. You may need to attach the policy manually."
+    log_warn "Policy ARN: ${USER_POLICY_ARN}"
+fi
+
 # Clean up temporary files
-rm -f /tmp/trust-policy.json /tmp/flink-policy.json
+rm -f /tmp/trust-policy.json /tmp/flink-policy.json /tmp/kinesis-producer-policy.json
 
 # Output summary
 log_info "=============================================="
@@ -294,30 +402,42 @@ log_info "Resources Created:"
 echo "  - S3 Bucket (Application JAR): ${STREAMING_APP_BUCKET}"
 echo "  - S3 Bucket (Data Sink): ${DATA_BUCKET}"
 echo "  - S3 Table: ${TABLE_NAME}"
-echo "  - IAM Role: ${IAM_ROLE_NAME}"
+echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
+echo "  - Kinesis Stream ARN: ${STREAM_ARN}"
+echo "  - IAM Role (Flink): ${IAM_ROLE_NAME}"
 echo "  - IAM Role ARN: ${ROLE_ARN}"
-echo "  - IAM Policy: ${IAM_POLICY_NAME}"
+echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
 echo "  - IAM Policy ARN: ${POLICY_ARN}"
+echo "  - IAM Policy (Producer): ${USER_POLICY_NAME}"
+echo "  - IAM Policy ARN (Producer): ${USER_POLICY_ARN}"
 echo "  - CloudWatch Log Group: ${LOG_GROUP_NAME}"
 echo "  - CloudWatch Log Stream: ${LOG_STREAM_NAME}"
 echo ""
-log_info "Save these values for use in cicd.sh:"
+log_info "Save these values for use in cicd.sh and test.sh:"
 echo "export FLINK_ROLE_ARN=\"${ROLE_ARN}\""
 echo "export STREAMING_APP_BUCKET=\"${STREAMING_APP_BUCKET}\""
 echo "export DATA_BUCKET=\"${DATA_BUCKET}\""
+echo "export KINESIS_STREAM_NAME=\"${KINESIS_STREAM_NAME}\""
+echo "export KINESIS_STREAM_ARN=\"${STREAM_ARN}\""
 echo "export LOG_GROUP=\"${LOG_GROUP_NAME}\""
 echo "export LOG_STREAM=\"${LOG_STREAM_NAME}\""
+echo "export BUCKET_SUFFIX=\"${BUCKET_SUFFIX}\""
 echo ""
 
 # Save configuration to file
+
 cat > /tmp/flink-config.env <<EOF
 export FLINK_ROLE_ARN="${ROLE_ARN}"
 export STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
 export DATA_BUCKET="${DATA_BUCKET}"
+export KINESIS_STREAM_NAME="${KINESIS_STREAM_NAME}"
+export KINESIS_STREAM_ARN="${STREAM_ARN}"
 export LOG_GROUP="${LOG_GROUP_NAME}"
 export LOG_STREAM="${LOG_STREAM_NAME}"
 export APP_NAME="${APP_NAME}"
 export REGION="${REGION}"
+export BUCKET_SUFFIX="${BUCKET_SUFFIX}"
+export S3_TABLE="${TABLE_NAME}"
 EOF
 
 log_info "Configuration saved to /tmp/flink-config.env"

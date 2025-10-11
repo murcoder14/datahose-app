@@ -38,8 +38,9 @@ fi
 
 # Configuration
 APP_NAME="${APP_NAME:-datahose-app}"
-STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET:-tm-streaming-app-bucket-20251010}"
-DATA_BUCKET="${DATA_BUCKET:-tm-data-bucket-20251010}"
+STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
+DATA_BUCKET="${DATA_BUCKET}"
+S3_TABLE="${S3_TABLE:-datafall}"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -58,6 +59,12 @@ if [ -z "${FLINK_ROLE_ARN}" ]; then
     exit 1
 fi
 
+if [ -z "${KINESIS_STREAM_ARN}" ]; then
+    log_error "KINESIS_STREAM_ARN is not set. Please run iac_create.sh first and source the configuration."
+    log_error "Or set it manually: export KINESIS_STREAM_ARN=<your-stream-arn>"
+    exit 1
+fi
+
 log_info "=============================================="
 log_info "CI/CD Pipeline for ${APP_NAME}"
 log_info "=============================================="
@@ -68,6 +75,7 @@ echo "  - Application Bucket: ${STREAMING_APP_BUCKET}"
 echo "  - Data Bucket: ${DATA_BUCKET}"
 echo "  - Region: ${REGION}"
 echo "  - IAM Role ARN: ${FLINK_ROLE_ARN}"
+echo "  - Kinesis Stream ARN: ${KINESIS_STREAM_ARN}"
 echo "  - Flink Version: ${FLINK_VERSION}"
 echo ""
 
@@ -211,17 +219,35 @@ if aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" 
         --application-name "${APP_NAME}" \
         --region "${REGION}" \
         --current-application-version-id ${APP_VERSION} \
-        --application-configuration-update "{
-            \"ApplicationCodeConfigurationUpdate\": {
-                \"CodeContentTypeUpdate\": \"ZIPFILE\",
-                \"CodeContentUpdate\": {
-                    \"S3ContentLocationUpdate\": {
-                        \"BucketARNUpdate\": \"arn:aws:s3:::${STREAMING_APP_BUCKET}\",
-                        \"FileKeyUpdate\": \"${S3_JAR_KEY}\",
-                        \"ObjectVersionUpdate\": \"${S3_OBJECT_VERSION}\"
-                    }
-                }
-            }
+        --application-configuration-update "{\
+            \"ApplicationCodeConfigurationUpdate\": {\
+                \"CodeContentTypeUpdate\": \"ZIPFILE\",\
+                \"CodeContentUpdate\": {\
+                    \"S3ContentLocationUpdate\": {\
+                        \"BucketARNUpdate\": \"arn:aws:s3:::${STREAMING_APP_BUCKET}\",\
+                        \"FileKeyUpdate\": \"${S3_JAR_KEY}\",\
+                        \"ObjectVersionUpdate\": \"${S3_OBJECT_VERSION}\"\
+                    }\
+                }\
+            },\
+            \"EnvironmentPropertyUpdates\": {\
+                \"PropertyGroups\": [\
+                    {\
+                        \"PropertyGroupId\": \"KinesisSource\",\
+                        \"PropertyMap\": {\
+                            \"stream.arn\": \"${KINESIS_STREAM_ARN}\",\
+                            \"aws.region\": \"${REGION}\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"S3Sink\",\
+                        \"PropertyMap\": {\
+                            \"bucket\": \"${DATA_BUCKET}\",\
+                            \"table\": \"${S3_TABLE}\"\
+                        }\
+                    }\
+                ]\
+            }\
         }"
     
     log_info "Application updated to READY state."
@@ -235,36 +261,51 @@ else
         --region "${REGION}" \
         --runtime-environment "${RUNTIME_ENVIRONMENT}" \
         --service-execution-role "${FLINK_ROLE_ARN}" \
-        --application-configuration "{
-            \"ApplicationCodeConfiguration\": {
-                \"CodeContent\": {
-                    \"S3ContentLocation\": {
-                        \"BucketARN\": \"arn:aws:s3:::${STREAMING_APP_BUCKET}\",
-                        \"FileKey\": \"${S3_JAR_KEY}\",
-                        \"ObjectVersion\": \"${S3_OBJECT_VERSION}\"
-                    }
-                },
-                \"CodeContentType\": \"ZIPFILE\"
-            },
-            \"FlinkApplicationConfiguration\": {
-                \"CheckpointConfiguration\": {
-                    \"ConfigurationType\": \"DEFAULT\"
-                },
-                \"MonitoringConfiguration\": {
-                    \"ConfigurationType\": \"CUSTOM\",
-                    \"MetricsLevel\": \"APPLICATION\",
-                    \"LogLevel\": \"INFO\"
-                },
-                \"ParallelismConfiguration\": {
-                    \"ConfigurationType\": \"CUSTOM\",
-                    \"Parallelism\": 1,
-                    \"ParallelismPerKPU\": 1,
-                    \"AutoScalingEnabled\": false
-                }
-            },
-            \"EnvironmentProperties\": {
-                \"PropertyGroups\": []
-            }
+        --application-configuration "{\
+            \"ApplicationCodeConfiguration\": {\
+                \"CodeContent\": {\
+                    \"S3ContentLocation\": {\
+                        \"BucketARN\": \"arn:aws:s3:::${STREAMING_APP_BUCKET}\",\
+                        \"FileKey\": \"${S3_JAR_KEY}\",\
+                        \"ObjectVersion\": \"${S3_OBJECT_VERSION}\"\
+                    }\
+                },\
+                \"CodeContentType\": \"ZIPFILE\"\
+            },\
+            \"FlinkApplicationConfiguration\": {\
+                \"CheckpointConfiguration\": {\
+                    \"ConfigurationType\": \"DEFAULT\"\
+                },\
+                \"MonitoringConfiguration\": {\
+                    \"ConfigurationType\": \"CUSTOM\",\
+                    \"MetricsLevel\": \"APPLICATION\",\
+                    \"LogLevel\": \"INFO\"\
+                },\
+                \"ParallelismConfiguration\": {\
+                    \"ConfigurationType\": \"CUSTOM\",\
+                    \"Parallelism\": 1,\
+                    \"ParallelismPerKPU\": 1,\
+                    \"AutoScalingEnabled\": false\
+                }\
+            },\
+            \"EnvironmentProperties\": {\
+                \"PropertyGroups\": [\
+                    {\
+                        \"PropertyGroupId\": \"KinesisSource\",\
+                        \"PropertyMap\": {\
+                            \"stream.arn\": \"${KINESIS_STREAM_ARN}\",\
+                            \"aws.region\": \"${REGION}\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"S3Sink\",\
+                        \"PropertyMap\": {\
+                            \"bucket\": \"${DATA_BUCKET}\",\
+                            \"table\": \"${S3_TABLE}\"\
+                        }\
+                    }\
+                ]\
+            }\
         }"
     
     log_info "Application created successfully in READY state."

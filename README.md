@@ -1,291 +1,164 @@
-# AWS Flink Streaming Application
 
-Complete AWS solution for deploying an Apache Flink 1.20 streaming application using Amazon Managed Service for Apache Flink. The application continuously generates streaming data at 2 records per second and writes it to an S3 table.
+# AWS Kinesis Streaming Solution (Flink, Kinesis, S3)
+
+This project provides a complete, production-ready AWS solution for real-time streaming using Apache Flink 1.20 (AWS Managed Flink), Kinesis Data Streams, and S3. It includes all scripts, code, and documentation for end-to-end deployment, testing, and troubleshooting.
 
 **Status:** ✅ Production-ready  
-**Region:** us-east-2 (configured via AWS CLI default profile)  
+**Region:** us-east-2  
 **Last Updated:** October 10, 2025
 
 ---
 
 ## Table of Contents
 
+- [Quick Start](#quick-start)
 - [Solution Architecture](#solution-architecture)
 - [Components](#components)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
+- [How Kinesis ARN is Passed](#how-kinesis-arn-is-passed)
 - [Scripts Reference](#scripts-reference)
 - [Application Details](#application-details)
 - [Data Structure](#data-structure)
-- [Monitoring & Operations](#monitoring--operations)
+- [Testing & Monitoring](#testing--monitoring)
 - [Troubleshooting](#troubleshooting)
 - [Clean Up](#clean-up)
+- [Cost Estimation](#cost-estimation)
+- [Project Structure](#project-structure)
+- [Technologies Used](#technologies-used)
+- [References](#references)
 
 ---
+
 
 ## Solution Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     AWS Cloud (us-east-2)                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  Amazon Managed Service for Apache Flink                │   │
-│  │  ┌─────────────────────────────────────────────┐        │   │
-│  │  │  Flink Application (datahose-app)          │        │   │
-│  │  │  - Apache Flink 1.20                       │        │   │
-│  │  │  - Java 11 (SDKMAN: 11.0.28-amzn)         │        │   │
-│  │  │  - DataStream API                          │        │   │
-│  │  │  - Streaming Mode (Continuous)             │        │   │
-│  │  │  - Data Generator: 2 records/sec           │        │   │
-│  │  │  - Rolling Policy: 30s inactivity / 2min   │        │   │
-│  │  │  - Checkpointing: 60s                      │        │   │
-│  │  └─────────────────────────────────────────────┘        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                            │                                     │
-│                            │ writes data continuously            │
-│                            ▼                                     │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  S3 Data Bucket: tm-data-bucket-20251010               │   │
-│  │  └── datafall/ (S3 Table with 'foams' column)         │   │
-│  │      └── 2025-10-10--17/                               │   │
-│  │          ├── part-xxx-0 (finalized)                    │   │
-│  │          ├── part-xxx-1 (finalized)                    │   │
-│  │          └── .part-xxx.inprogress (in-progress)        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  S3 Application Bucket: tm-streaming-app-bucket-20251010 │
-│  │  └── datahose-app.jar (31 MB, versioned)              │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  IAM Role: datahose-app-flink-role                     │   │
-│  │  └── Policy: datahose-app-flink-policy                 │   │
-│  │      - S3 Read/Write                                   │   │
-│  │      - CloudWatch Logs/Metrics                         │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  CloudWatch Logs: /aws/kinesis-analytics/datahose-app │   │
-│  │  - Retention: 7 days                                   │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                     AWS Cloud (us-east-2)                                   │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ User (test.sh) → Kinesis (lowercase) → Flink (UPPERCASE) → S3 (UPPERCASE)   │
+│                                                                              │
+│  ┌───────────────┐   ┌───────────────┐   ┌───────────────┐   ┌────────────┐  │
+│  │ test.sh      │   │ Kinesis       │   │ Flink         │   │ S3         │  │
+│  │ (producer)   │   │ tm-input-stream│  │ datahose-app  │   │ datafall/  │  │
+│  └───────────────┘   └───────────────┘   └───────────────┘   └────────────┘  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
+
+---
+
 
 ## Components
 
-### 1. Flink Application (`datahose-app`)
-- **Runtime:** Apache Flink 1.20 (STREAMING mode)
-- **Language:** Java 11 (managed via SDKMAN)
-- **Source:** DataGeneratorSource (unbounded, 2 records/second)
-- **Sink:** S3 FileSink with rolling policy
-- **Checkpointing:** Every 60 seconds
-- **Data Format:** Text records with timestamp
-- **Parallelism:** 1 KPU (Kinesis Processing Unit)
 
-### 2. S3 Buckets
-- **Application Bucket:** `tm-streaming-app-bucket-20251010`
-  - Stores versioned JAR file (31 MB)
-  - Versioning enabled for rollback capability
-  
-- **Data Bucket:** `tm-data-bucket-20251010`
-  - Stores streaming output in `datafall/` table
-  - Versioning enabled
-  - Rolling files based on inactivity (30s) or time (2min)
+### Flink Application (`datahose-app`)
+- Apache Flink 1.20 (STREAMING mode)
+- Java 11 (SDKMAN: 11.0.28-amzn)
+- Reads from Kinesis Data Stream (`tm-input-stream`)
+- Transforms all data to UPPERCASE
+- Writes to S3 (`datafall/` table)
+- Checkpointing: 60s
+- Rolling Policy: 30s inactivity / 2min max
 
-### 3. IAM Resources
-- **Role:** `datahose-app-flink-role`
-  - Service: `kinesisanalytics.amazonaws.com`
-  - Trust relationship configured for Managed Flink
-  
-- **Policy:** `datahose-app-flink-policy`
-  - S3: GetObject, PutObject, ListBucket
-  - CloudWatch: CreateLogGroup, CreateLogStream, PutLogEvents, PutMetricData
-  - EC2/VPC: DescribeVpcs, DescribeSubnets, etc. (for VPC access)
+### S3 Buckets
+- **Dynamic Naming:** Buckets are created with the current date and Unix epoch for uniqueness, e.g. `tm-streaming-app-bucket-20251010-1760143646` and `tm-data-bucket-20251010-1760143646`.
+- Application Bucket: `tm-streaming-app-bucket-<date>-<epoch>` (stores JAR)
+- Data Bucket: `tm-data-bucket-<date>-<epoch>` (stores output)
+  - Buckets are auto-detected by scripts; no need to manually update names after each deployment.
 
-### 4. CloudWatch Resources
-- **Log Group:** `/aws/kinesis-analytics/datahose-app`
-- **Retention:** 7 days
-- **Log Types:** Application logs, checkpoint logs, error logs
+### Kinesis Data Stream
+- Name: `tm-input-stream` (1 shard)
+- Receives lowercase words from `test.sh`
+
+### IAM Resources
+- Role: `datahose-app-flink-role` (for Flink)
+- Policy: `datahose-app-flink-policy` (S3, Kinesis, CloudWatch)
+- User Policy: `datahose-app-kinesis-producer-policy` (for test.sh user)
+
+### CloudWatch
+- Log Group: `/aws/kinesis-analytics/datahose-app`
+- Retention: 7 days
 
 ---
+
+## How Kinesis ARN is Passed
+
+The Kinesis Data Stream ARN is passed from the infrastructure to the Flink application using **AWS Managed Flink's Application Properties** feature. This is the recommended and secure way to pass runtime configuration to Flink applications.
+
+**Process:**
+1. `iac_create.sh` creates the Kinesis stream and saves the ARN to `/tmp/flink-config.env`.
+2. You run `source /tmp/flink-config.env` to load the ARN as an environment variable.
+3. `cicd.sh` passes the ARN to AWS via Application Properties (PropertyGroups).
+4. Flink app reads the ARN at runtime using `KinesisAnalyticsRuntime.getApplicationProperties()`.
+
+**Key Java code:**
+```java
+Map<String, Properties> applicationProperties = KinesisAnalyticsRuntime.getApplicationProperties();
+Properties kinesisProps = applicationProperties.getOrDefault("KinesisSource", new Properties());
+String streamArn = kinesisProps.getProperty("stream.arn");
+```
+
+**Benefits:**
+- No ARN in source code or Git
+- Change stream without rebuilding
+- AWS best practice
+
+---
+
+---
+
 
 ## Prerequisites
 
-### Required Software
-
-1. **AWS CLI** (v2 or later)
-   ```bash
-   aws --version
-   # If not installed: https://aws.amazon.com/cli/
-   ```
-
-2. **Maven** (3.x or later)
-   ```bash
-   mvn --version
-   # If not installed: https://maven.apache.org/install.html
-   ```
-
+1. **AWS CLI** (v2+)
+2. **Maven** (3.x+)
 3. **Java 11** (via SDKMAN recommended)
-   ```bash
-   # Install SDKMAN
-   curl -s "https://get.sdkman.io" | bash
-   source "$HOME/.sdkman/bin/sdkman-init.sh"
-   
-   # Install Java 11
-   sdk install java 11.0.28-amzn
-   sdk use java 11.0.28-amzn
-   ```
-   
-   > **⚠️ CRITICAL:** You must run `sdk use java 11.0.28-amzn` in **every new shell/terminal session** before running Maven commands or building the application. The `./setup-env.sh` and `./cicd.sh` scripts do this automatically.
-
 4. **jq** (for JSON parsing)
-   ```bash
-   # Fedora/RHEL
-   sudo dnf install jq
-   
-   # Ubuntu/Debian
-   sudo apt-get install jq
-   
-   # macOS
-   brew install jq
-   ```
-
-### AWS Configuration
-
-1. **Configure AWS Credentials**
-   ```bash
-   aws configure
-   ```
-   
-   You'll need:
-   - AWS Access Key ID
-   - AWS Secret Access Key
-   - Default region: **us-east-2**
-   - Default output format: json
-
-2. **Set Region** (critical!)
-   ```bash
-   aws configure set region us-east-2
-   ```
-   
-   Verify:
-   ```bash
-   aws configure get region
-   # Should output: us-east-2
-   ```
-
-3. **Required AWS Permissions**
-   
-   Your AWS user/role needs:
-   - IAM: `CreateRole`, `DeleteRole`, `CreatePolicy`, `DeletePolicy`, `AttachRolePolicy`, `DetachRolePolicy`
-   - S3: `CreateBucket`, `DeleteBucket`, `PutObject`, `GetObject`, `ListBucket`
-   - Kinesis Analytics: `CreateApplication`, `DeleteApplication`, `StartApplication`, `StopApplication`
-   - CloudWatch: `CreateLogGroup`, `DeleteLogGroup`, `PutRetentionPolicy`
+5. **AWS credentials** with permissions for IAM, S3, Kinesis, CloudWatch
+6. **Region:** us-east-2
 
 ---
 
-## Quick Start
 
-> **⚠️ IMPORTANT:** Every time you open a new shell/terminal, you must set Java 11:
-> ```bash
-> sdk use java 11.0.28-amzn
-> ```
-> Or run `./setup-env.sh` to initialize the environment automatically.
+## 🚀 Quick Start
 
-### 1. Clone and Setup Environment
-
+### 1. Set Java Version (REQUIRED in every new terminal)
 ```bash
-cd datahose-app
-./setup-env.sh
+sdk use java 11.0.28-amzn
 ```
 
-This script:
-- Initializes SDKMAN and Java 11 (run this in every new shell session!)
-- Loads Flink configuration
-- Sets up AWS region from your CLI profile
-- Displays available commands
-
-**Note:** The `cicd.sh` script automatically initializes Java 11, but for manual Maven commands, always ensure Java 11 is active first.
-
-### 2. Create Infrastructure
-
+### 2. Create Infrastructure (Dynamic Buckets)
 ```bash
 ./iac_create.sh
+# No need to manually update bucket names; scripts will auto-detect the latest.
 ```
 
-This creates:
-- S3 buckets (application + data)
-- IAM role and policy
-- CloudWatch log group
-- Configuration file at `/tmp/flink-config.env`
-
-**Expected output:**
-```
-[INFO] Infrastructure Creation Complete!
-[INFO] Resources Created:
-  ✓ S3 Bucket (Application): tm-streaming-app-bucket-20251010
-  ✓ S3 Bucket (Data): tm-data-bucket-20251010
-  ✓ IAM Role: datahose-app-flink-role
-  ✓ CloudWatch Log Group: /aws/kinesis-analytics/datahose-app
-```
-
-### 3. Build and Deploy
-
+### 3. Build & Deploy Application
 ```bash
-# Load configuration
-source /tmp/flink-config.env
-
-# Build and deploy
 ./cicd.sh
 ```
 
-This script:
-1. Initializes Java 11 via SDKMAN
-2. Builds the application with Maven (creates 31 MB JAR)
-3. Uploads JAR to S3
-4. Creates/updates Flink application
-5. Starts the application in STREAMING mode
-6. Displays initial logs
-
-**Expected output:**
-```
-[INFO] Build complete: target/datahose-app.jar (31 MB)
-[INFO] JAR uploaded to S3
-[INFO] Flink application created/updated
-[INFO] Application starting...
-[INFO] Application status: RUNNING
-```
-
-### 4. Verify Deployment
-
+### 4. Verify Deployment (Self-Contained)
 ```bash
 ./verify.sh
+# No need to source config; always checks the latest buckets.
 ```
 
-Performs 6 health checks:
-1. ✓ AWS credentials
-2. ✓ S3 buckets exist
-3. ✓ IAM role exists
-4. ✓ CloudWatch log group exists
-5. ✓ Flink application status (RUNNING)
-6. ✓ Recent logs available
-
-### 5. Monitor Data Output
-
+### 5. Send Test Data
 ```bash
-# Watch application logs
+./test.sh
+# Sends 5 random lowercase words every 5 seconds
+# Press Ctrl+C to stop
+```
+
+### 6. Monitor Logs & Output
+```bash
 aws logs tail /aws/kinesis-analytics/datahose-app --follow
-
-# Check S3 data files
-aws s3 ls s3://tm-data-bucket-20251010/datafall/ --recursive
-
-# View sample data
-aws s3 cp s3://tm-data-bucket-20251010/datafall/2025-10-10--17/part-0-0 - | head -10
+aws s3 ls s3://<latest-tm-data-bucket-*>/datafall/ --recursive
+aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--XX/part-0-0 - | head -20
+# Output should be UPPERCASE
 ```
 
 ---
@@ -383,23 +256,24 @@ source /tmp/flink-config.env
 
 ---
 
-### `verify.sh` - Health Check
+### `verify.sh` - Health Check (Self-Contained)
 
 **Purpose:** Verify all resources and application health
 
-**What it does:**
-Performs 6 checks:
-1. AWS credentials configured
-2. S3 buckets exist and accessible
-3. IAM role exists
-4. CloudWatch log group exists
-5. Flink application status
-6. Recent logs available
+**Key Features:**
+- **Self-contained:** No need to run `source /tmp/flink-config.env` or set environment variables.
+- **Auto-detects** the latest dynamic S3 bucket names for both application and data buckets by creation date and prefix.
+- Checks AWS credentials, S3 buckets, IAM role, CloudWatch log group, Flink application status, and recent logs.
 
 **Usage:**
 ```bash
 ./verify.sh
 ```
+
+**How it works:**
+- Finds the most recently created `tm-streaming-app-bucket-*` and `tm-data-bucket-*` buckets automatically.
+- Lists JAR files and recent data files.
+- No manual configuration needed after each deployment.
 
 **Example Output:**
 ```
@@ -412,26 +286,48 @@ Performs 6 checks:
 [✓] User/Role: arn:aws:iam::047472788728:user/username
 
 === S3 Buckets ===
-[✓] Application bucket: tm-streaming-app-bucket-20251010
-[✓] Data bucket: tm-data-bucket-20251010
+[✓] Application bucket exists: tm-streaming-app-bucket-20251010-1760143646
+[✓] JAR files in bucket: 1
+[✓] Data bucket exists: tm-data-bucket-20251010-1760143646
+[✓] Table folder exists: datafall
+[✓] Files in table: 4
+
+  Recent files:
+  2025-10-10 20:47:40 tm-data-bucket-20251010-1760143646
+  ...
+
+=== Kinesis Data Stream ===
+[✓] Kinesis stream exists: tm-input-stream
+[✓] Stream status: ACTIVE ✓
+[✓] Shard count: 1
+[✓] Stream ARN: arn:aws:kinesis:us-east-2:047472788728:stream/tm-input-stream
 
 === IAM Resources ===
-[✓] IAM Role: datahose-app-flink-role
+[✓] IAM Role exists: datahose-app-flink-role
+[✓] Role ARN: arn:aws:iam::047472788728:role/datahose-app-flink-role
+[✓] Attached policies: 1
+[✓] User policy exists: datahose-app-kinesis-producer-policy
+[✓] Policy attached to user sunny0524 ✓
 
 === CloudWatch Logs ===
-[✓] Log group: /aws/kinesis-analytics/datahose-app
+[✓] Log group exists: /aws/kinesis-analytics/datahose-app
+[✓] Retention period: 7 days
+[✓] Log streams: 1
 
 === Flink Application ===
-[✓] Application: datahose-app
-[✓] Status: RUNNING
-[✓] Version: 3
+[✓] Application exists: datahose-app
+[✓] Status: RUNNING ✓
+[✓] Version: 1
+[✓] Runtime: FLINK-1_20
+[✓] Created: 2025-10-10T20:48:53-04:00
+[✓] Last Updated: 2025-10-10T20:50:42-04:00
 
-=== Recent Logs ===
-[✓] Found 150 log entries in the last 10 minutes
+[✓] Recent log entries (last 5 minutes):
+...
 
 === Summary ===
-Health Score: 6/6 checks passed
-[✓] System is healthy
+Health Score: 8/8 checks passed
+[✓] All systems operational! ✓
 ```
 
 ---
@@ -469,229 +365,124 @@ Health Score: 6/6 checks passed
 
 ---
 
-## Application Details
 
-### Source Code
+## Application Details
 
 **File:** `src/main/java/org/muralis/datahose/StreamingApp.java`
 
 **Key Features:**
+- Reads from Kinesis Data Stream (`tm-input-stream`)
+- Transforms all data to UPPERCASE using MapFunction
+- Writes to S3 (`datafall/` table)
+- Checkpointing: 60s
+- Rolling Policy: 30s inactivity / 2min max
 
-1. **Unbounded Data Generator**
-   ```java
-   DataGeneratorSource<String> source = new DataGeneratorSource<>(
-       index -> String.format("Record-%d: Data from foams column at %s", 
-           index, Instant.now()),
-       Long.MAX_VALUE,  // Unbounded stream
-       RateLimiterStrategy.perSecond(2)  // 2 records/second
-   );
-   ```
-
-2. **S3 File Sink**
-   ```java
-   FileSink<String> sink = FileSink
-       .forRowFormat(new Path("s3://tm-data-bucket-20251010/datafall"), 
-           new SimpleStringEncoder<String>("UTF-8"))
-       .withRollingPolicy(
-           DefaultRollingPolicy.builder()
-               .withRolloverInterval(Duration.ofMinutes(2))
-               .withInactivityInterval(Duration.ofSeconds(30))
-               .withMaxPartSize(1024 * 1024)  // 1 MB
-               .build()
-       )
-       .build();
-   ```
-
-3. **Checkpointing**
-   ```java
-   env.enableCheckpointing(60000);  // Every 60 seconds
-   ```
-
-### Data Flow
-
-```
-DataGeneratorSource (2 rec/sec)
-         ↓
-    Stream<String>
-         ↓
-   S3 FileSink (rolling every 30s-2min)
-         ↓
-  s3://tm-data-bucket-20251010/datafall/
-```
-
-### Record Format
-
-Each record contains:
-```
-Record-{index}: Data from foams column at {ISO-8601 timestamp}
-```
-
-**Example:**
-```
-Record-0: Data from foams column at 2025-10-10T17:15:23.456Z
-Record-1: Data from foams column at 2025-10-10T17:15:23.956Z
-Record-2: Data from foams column at 2025-10-10T17:15:24.456Z
+**Transformation Example:**
+```java
+DataStream<String> transformedStream = inputStream.map(
+  value -> value.toUpperCase()
+);
 ```
 
 ---
+
+---
+
+datafall/
 
 ## Data Structure
 
 ### S3 Table: `datafall`
 
-**Location:** `s3://tm-data-bucket-20251010/datafall/`
+**Location:** `s3://tm-data-bucket-<date>-<epoch>/datafall/` (auto-detected by scripts)
 
 **Schema:**
-| Column | Type | Description |
-|--------|------|-------------|
-| foams  | VARCHAR | Streaming data content with timestamp |
+| Column | Type    | Description                        |
+|--------|---------|------------------------------------|
+| foams  | STRING  | Streaming data (UPPERCASE)         |
 
 **Directory Structure:**
 ```
 datafall/
 ├── 2025-10-10--17/
-│   ├── part-0-0                    # Finalized file (~7.2 KB)
-│   ├── part-0-1                    # Finalized file (~7.2 KB)
-│   ├── part-0-2                    # Finalized file (~7.2 KB)
-│   └── .part-0-3.inprogress.xyz    # Currently being written
-├── 2025-10-10--18/
-│   └── ...
+│   ├── part-0-0                    # Finalized file
+│   ├── part-0-1                    # Finalized file
+│   └── .part-0-2.inprogress.xyz    # In-progress
+├── ...
 ```
 
-**File Properties:**
-- **Naming:** `part-{subtask}-{fileIndex}`
-- **In-Progress:** `.part-{subtask}-{fileIndex}.inprogress.{uuid}`
-- **Format:** Plain text (UTF-8)
-- **Rolling:** New file every 30s (inactivity) or 2min (max time)
-- **Size:** ~7.2 KB per finalized file (at 2 rec/sec for 30-120s)
-
-### Querying Data
-
-**Method 1: Direct S3 read**
+**Querying Data:**
 ```bash
-# List all data files
-aws s3 ls s3://tm-data-bucket-20251010/datafall/ --recursive
-
-# Download and view specific file
-aws s3 cp s3://tm-data-bucket-20251010/datafall/2025-10-10--17/part-0-0 - | head -20
-
-# Count total records in a file
-aws s3 cp s3://tm-data-bucket-20251010/datafall/2025-10-10--17/part-0-0 - | wc -l
-```
-
-**Method 2: S3 Select (SQL-like)**
-```bash
-# Query data using S3 Select
-aws s3api select-object-content \
-  --bucket tm-data-bucket-20251010 \
-  --key "datafall/2025-10-10--17/part-0-0" \
-  --expression "SELECT * FROM S3Object[*][*] s LIMIT 10" \
-  --expression-type SQL \
-  --input-serialization '{"CSV": {"FileHeaderInfo": "NONE"}}' \
-  --output-serialization '{"CSV": {}}' \
-  output.csv
-  
-cat output.csv
-```
-
-**Method 3: AWS Athena** (for larger datasets)
-```sql
--- Create external table
-CREATE EXTERNAL TABLE datafall (
-  foams STRING
-)
-LOCATION 's3://tm-data-bucket-20251010/datafall/';
-
--- Query data
-SELECT COUNT(*) FROM datafall;
-SELECT * FROM datafall LIMIT 10;
+# List files
+aws s3 ls s3://<latest-tm-data-bucket-*>/datafall/ --recursive
+# View sample
+aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--17/part-0-0 - | head -10
+# Should be UPPERCASE
 ```
 
 ---
 
-## Monitoring & Operations
+---
 
-### Application Status
 
+## Testing & Monitoring
+
+### Send Test Data
 ```bash
-# Check application status
-aws kinesisanalyticsv2 describe-application \
-  --application-name datahose-app \
-  --query 'ApplicationDetail.ApplicationStatus'
-
-# Possible statuses: READY, STARTING, RUNNING, STOPPING, DELETING
+./test.sh
+# Sends 5 random lowercase words every 5 seconds
+# Press Ctrl+C to stop
 ```
 
-### View Logs
-
+### Monitor Logs
 ```bash
-# Tail logs in real-time
 aws logs tail /aws/kinesis-analytics/datahose-app --follow
-
-# Get last 100 log entries
-aws logs tail /aws/kinesis-analytics/datahose-app --since 10m
-
-# Filter for errors
-aws logs filter-log-events \
-  --log-group-name /aws/kinesis-analytics/datahose-app \
-  --filter-pattern "ERROR"
 ```
 
-### Check Data Output
-
+### Check S3 Output
 ```bash
-# Count files in S3
-aws s3 ls s3://tm-data-bucket-20251010/datafall/ --recursive | wc -l
-
-# Show recent files
-aws s3 ls s3://tm-data-bucket-20251010/datafall/ --recursive | tail -10
-
-# Calculate total data size
-aws s3 ls s3://tm-data-bucket-20251010/datafall/ --recursive --summarize | grep "Total Size"
-```
-
-### Stop Application
-
-```bash
-# Stop gracefully
-aws kinesisanalyticsv2 stop-application \
-  --application-name datahose-app
-
-# Force stop
-aws kinesisanalyticsv2 stop-application \
-  --application-name datahose-app \
-  --force
-```
-
-### Start Application
-
-```bash
-# Start application (after stopping)
-aws kinesisanalyticsv2 start-application \
-  --application-name datahose-app \
-  --run-configuration '{"ApplicationRestoreConfiguration":{"ApplicationRestoreType":"RESTORE_FROM_LATEST_SNAPSHOT"}}'
-```
-
-### Update Application
-
-```bash
-# After modifying code, rebuild and redeploy
-mvn clean package
-./cicd.sh
-```
-
-### Checkpoints
-
-```bash
-# List checkpoints (stored in S3)
-aws s3 ls s3://tm-streaming-app-bucket-20251010/checkpoints/ --recursive
-
-# Application automatically restores from last checkpoint on restart
+aws s3 ls s3://<latest-tm-data-bucket-*>/datafall/ --recursive
+aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--XX/part-0-0 - | head -20
+# Output should be UPPERCASE
 ```
 
 ---
+
 
 ## Troubleshooting
+
+### Application won't start
+```bash
+aws logs tail /aws/kinesis-analytics/datahose-app --since 10m | grep -i error
+aws kinesisanalyticsv2 describe-application --application-name datahose-app
+```
+**Common Causes:**
+- S3 path or bucket name incorrect
+- IAM permissions missing
+- JAR file corrupt
+
+### No data in S3
+```bash
+aws s3 ls s3://<latest-tm-data-bucket-*>/
+aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error"
+# Wait at least 2 minutes for first file
+```
+
+### test.sh fails
+```bash
+aws kinesis describe-stream --stream-name tm-input-stream
+aws iam list-attached-user-policies --user-name <your-user>
+```
+
+### Data not uppercase
+- Check application logs for transformation errors
+- Rebuild and redeploy: `./cicd.sh`
+
+### Region or Java version issues
+- Always set region to us-east-2
+- Always run `sdk use java 11.0.28-amzn` in every new terminal
+
+---
 
 ### Application Won't Start
 
@@ -727,7 +518,7 @@ aws kinesisanalyticsv2 describe-application \
 **Diagnosis:**
 ```bash
 # Check if data bucket exists
-aws s3 ls s3://tm-data-bucket-20251010/
+aws s3 ls s3://<latest-tm-data-bucket-*>/
 
 # Check application logs for errors
 aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error"
@@ -841,165 +632,93 @@ bash iac_create.sh
 
 ---
 
-## Clean Up
 
-### Option 1: Use Destroy Script (Recommended)
+## Clean Up
 
 ```bash
 # Interactive mode with confirmation
 ./iac_destroy.sh
-
-# Force mode (skip confirmation)
+# Or force without confirmation
 ./iac_destroy.sh --force
 ```
 
-This safely removes:
+This removes:
 - Flink application
 - S3 buckets (all objects including versions)
 - IAM role and policy
 - CloudWatch log group
 
-### Option 2: Manual Cleanup
-
-If the destroy script fails:
-
-```bash
-# 1. Stop and delete Flink application
-CREATE_TS=$(aws kinesisanalyticsv2 describe-application \
-  --application-name datahose-app \
-  --query 'ApplicationDetail.CreateTimestamp' --output text)
-
-aws kinesisanalyticsv2 stop-application --application-name datahose-app --force
-aws kinesisanalyticsv2 delete-application \
-  --application-name datahose-app \
-  --create-timestamp "$CREATE_TS"
-
-# 2. Delete S3 buckets (including all versions)
-aws s3 rb s3://tm-streaming-app-bucket-20251010 --force
-aws s3 rb s3://tm-data-bucket-20251010 --force
-
-# 3. Delete IAM resources
-aws iam detach-role-policy \
-  --role-name datahose-app-flink-role \
-  --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/datahose-app-flink-policy
-
-aws iam delete-policy \
-  --policy-arn arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/datahose-app-flink-policy
-
-aws iam delete-role --role-name datahose-app-flink-role
-
-# 4. Delete CloudWatch log group
-aws logs delete-log-group --log-group-name /aws/kinesis-analytics/datahose-app
-
-# 5. Clean up local files
-rm -f /tmp/flink-config.env
-```
+---
 
 ---
+
 
 ## Cost Estimation
 
-**Estimated Monthly Cost (us-east-2):**
-
-| Service | Usage | Estimated Cost |
-|---------|-------|----------------|
-| Managed Flink | 1 KPU, 24/7 | ~$45/month |
-| S3 Storage | ~100 GB/month (at 2 rec/sec) | ~$2.30/month |
-| S3 Requests | PUT/GET operations | ~$0.50/month |
-| CloudWatch Logs | 7-day retention, moderate logs | ~$2/month |
-| Data Transfer | Minimal (S3 same-region) | ~$0.50/month |
-| **Total** | | **~$50/month** |
-
-**Cost Optimization Tips:**
-1. Stop application when not needed: `aws kinesisanalyticsv2 stop-application --application-name datahose-app`
-2. Reduce log retention: Modify `LOG_RETENTION_DAYS` in `iac_create.sh`
-3. Clean up old S3 data: Set up lifecycle policies
-4. Monitor via AWS Cost Explorer
+| Service              | Usage         | Estimated Cost |
+|----------------------|--------------|----------------|
+| Managed Flink        | 1 KPU, 24/7  | ~$45           |
+| Kinesis Data Stream  | 1 shard      | ~$15           |
+| S3 Storage           | ~100 GB      | ~$2.30         |
+| CloudWatch           | Logs/metrics | ~$2            |
+| Data Transfer        | Minimal      | ~$0.50         |
+| **Total**            |              | **~$65/month** |
 
 ---
+
+---
+
+datahose-app/
 
 ## Project Structure
 
 ```
 datahose-app/
-├── src/
-│   ├── main/
-│   │   └── java/
-│   │       └── org/
-│   │           └── muralis/
-│   │               └── datahose/
-│   │                   └── StreamingApp.java      # Main application
-│   └── test/
-│       └── java/
-│           └── org/
-│               └── muralis/
-│                   └── datahose/
-├── target/
-│   └── datahose-app.jar                          # Built artifact (31 MB)
-├── pom.xml                                        # Maven configuration
-├── iac_create.sh                                  # Create infrastructure
-├── iac_destroy.sh                                 # Destroy infrastructure
-├── cicd.sh                                        # Build and deploy
-├── verify.sh                                      # Health check
-├── setup-env.sh                                   # Environment setup
-└── README.md                                      # This file
+├── src/main/java/org/muralis/datahose/StreamingApp.java
+├── src/test/java/org/muralis/datahose/
+├── target/datahose-app.jar
+├── pom.xml
+├── iac_create.sh
+├── iac_destroy.sh
+├── cicd.sh
+├── verify.sh
+├── setup-env.sh
+├── test.sh
+└── README.md
 ```
 
 ---
+
+---
+
 
 ## Technologies Used
 
-- **Apache Flink 1.20** - Stream processing framework
-- **Java 11** - Programming language (SDKMAN: 11.0.28-amzn)
-- **Maven 3.x** - Build tool
-- **AWS Managed Service for Apache Flink** - Serverless Flink runtime
-- **Amazon S3** - Object storage for code and data
-- **AWS IAM** - Identity and access management
-- **Amazon CloudWatch** - Logging and monitoring
-- **AWS CLI** - Infrastructure management
-- **Bash** - Automation scripts
+- Apache Flink 1.20
+- Java 11 (SDKMAN: 11.0.28-amzn)
+- Maven 3.x
+- AWS Managed Service for Apache Flink
+- Amazon S3
+- AWS IAM
+- Amazon CloudWatch
+- AWS CLI
+- Bash
 
 ---
 
-## Support & Documentation
+---
 
-### Official Documentation
+
+## References
+
 - [Apache Flink Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.20/)
 - [AWS Managed Service for Apache Flink](https://docs.aws.amazon.com/kinesisanalytics/)
-- [Flink DataStream API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/datastream/overview/)
-
-### Useful Commands Quick Reference
-
-```bash
-# Environment
-./setup-env.sh                                    # Initialize environment
-source /tmp/flink-config.env                      # Load configuration
-
-# Infrastructure
-./iac_create.sh                                   # Create all resources
-./iac_destroy.sh                                  # Destroy all resources
-
-# Deployment
-./cicd.sh                                         # Build and deploy
-./verify.sh                                       # Health check
-
-# Monitoring
-aws kinesisanalyticsv2 describe-application --application-name datahose-app
-aws logs tail /aws/kinesis-analytics/datahose-app --follow
-aws s3 ls s3://tm-data-bucket-20251010/datafall/ --recursive
-
-# Operations
-aws kinesisanalyticsv2 stop-application --application-name datahose-app
-aws kinesisanalyticsv2 start-application --application-name datahose-app
-```
+- [Flink Kinesis Connector](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/connectors/datastream/kinesis/)
+- [AWS Kinesis Data Streams](https://docs.aws.amazon.com/streams/latest/dev/fundamental-stream.html)
 
 ---
 
-## License
-
-This project is for educational and demonstration purposes.
-
----
+**License:** For educational and demonstration purposes.
 
 **Last Updated:** October 10, 2025  
 **Version:** 1.0  
