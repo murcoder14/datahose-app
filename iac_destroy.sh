@@ -35,16 +35,15 @@ log_error() {
 APP_NAME="datahose-app"
 # Auto-detect latest dynamic S3 buckets by prefix and creation date
 # Load bucket names from environment or config file
-if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$DATA_BUCKET" ]; then
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$INPUT_DATA_BUCKET" ] || [ -z "$OUTPUT_DATA_BUCKET" ]; then
     if [ -f "/tmp/flink-config.env" ]; then
         source /tmp/flink-config.env
     fi
 fi
-if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$DATA_BUCKET" ]; then
-    echo -e "${RED}[ERROR]${NC} STREAMING_APP_BUCKET and/or DATA_BUCKET not set. Please export them or source /tmp/flink-config.env from your deployment before running this script."
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$INPUT_DATA_BUCKET" ] || [ -z "$OUTPUT_DATA_BUCKET" ]; then
+    echo -e "${RED}[ERROR]${NC} STREAMING_APP_BUCKET, INPUT_DATA_BUCKET, and/or OUTPUT_DATA_BUCKET not set. Please export them or source /tmp/flink-config.env from your deployment before running this script."
     exit 1
 fi
-KINESIS_STREAM_NAME="tm-input-stream"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -53,7 +52,7 @@ if [ -z "$REGION" ]; then
 fi
 IAM_ROLE_NAME="${APP_NAME}-flink-role"
 IAM_POLICY_NAME="${APP_NAME}-flink-policy"
-USER_POLICY_NAME="${APP_NAME}-kinesis-producer-policy"
+USER_POLICY_NAME="${APP_NAME}-s3-upload-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
 
 log_warn "=============================================="
@@ -62,11 +61,11 @@ log_warn "=============================================="
 echo ""
 log_warn "Resources to be deleted:"
 echo "  - S3 Bucket: ${STREAMING_APP_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${DATA_BUCKET} (and all contents)"
-echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
+echo "  - S3 Bucket: ${INPUT_DATA_BUCKET} (and all contents)"
+echo "  - S3 Bucket: ${OUTPUT_DATA_BUCKET} (and all contents)"
 echo "  - IAM Role: ${IAM_ROLE_NAME}"
 echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
-echo "  - IAM Policy (Producer): ${USER_POLICY_NAME}"
+echo "  - IAM Policy (S3 Upload): ${USER_POLICY_NAME}"
 echo "  - CloudWatch Log Group: ${LOG_GROUP_NAME}"
 echo "  - Flink Application: ${APP_NAME}"
 echo ""
@@ -229,20 +228,13 @@ delete_s3_bucket() {
     fi
 }
 
-# Delete both S3 buckets
+# Delete all S3 buckets
 delete_s3_bucket "${STREAMING_APP_BUCKET}"
-delete_s3_bucket "${DATA_BUCKET}"
+delete_s3_bucket "${INPUT_DATA_BUCKET}"
+delete_s3_bucket "${OUTPUT_DATA_BUCKET}"
 
-# Delete Kinesis Data Stream
-log_info "Deleting Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
-if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
-    aws kinesis delete-stream \
-        --stream-name "${KINESIS_STREAM_NAME}" \
-        --region "${REGION}" 2>&1
-    log_info "Kinesis stream deleted successfully."
-else
-    log_warn "Kinesis stream ${KINESIS_STREAM_NAME} not found. Skipping..."
-fi
+# Kinesis Data Stream is no longer used in S3-to-S3 architecture
+log_info "Skipping Kinesis Data Stream deletion (S3-to-S3 architecture)..."
 
 # Detach user policy from sunny0524 and delete user policy
 USER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${USER_POLICY_NAME}"
@@ -333,8 +325,7 @@ log_info "Infrastructure Destruction Complete!"
 log_info "=============================================="
 echo ""
 log_info "All resources have been removed:"
-echo "  ✓ S3 Buckets deleted"
-echo "  ✓ Kinesis Data Stream deleted"
+echo "  ✓ S3 Buckets deleted (Application JAR, Input Data, Output Data)"
 echo "  ✓ IAM Role and Policies deleted"
 echo "  ✓ CloudWatch Log Group deleted"
 echo "  ✓ Flink Application deleted"

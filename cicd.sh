@@ -39,14 +39,19 @@ fi
 # Configuration
 APP_NAME="${APP_NAME:-datahose-app}"
 STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
-DATA_BUCKET="${DATA_BUCKET}"
-S3_TABLE="${S3_TABLE:-datafall}"
+INPUT_DATA_BUCKET="${INPUT_DATA_BUCKET}"
+OUTPUT_DATA_BUCKET="${OUTPUT_DATA_BUCKET}"
+INPUT_DATA_BUCKET_TABLE_NAME="${INPUT_DATA_BUCKET_TABLE_NAME:-datafall}"
+OUTPUT_DATA_BUCKET_TABLE_NAME="${OUTPUT_DATA_BUCKET_TABLE_NAME:-datalake}"
+LOG_GROUP="${LOG_GROUP:-/aws/kinesis-analytics/${APP_NAME}}"
+
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
     echo -e "${RED}[ERROR]${NC} No default region configured. Please run: aws configure set region us-east-2"
     exit 1
 fi
+
 JAR_FILE="target/${APP_NAME}.jar"
 S3_JAR_KEY="${APP_NAME}.jar"
 FLINK_VERSION="FLINK-1_20"
@@ -59,9 +64,15 @@ if [ -z "${FLINK_ROLE_ARN}" ]; then
     exit 1
 fi
 
-if [ -z "${KINESIS_STREAM_ARN}" ]; then
-    log_error "KINESIS_STREAM_ARN is not set. Please run iac_create.sh first and source the configuration."
-    log_error "Or set it manually: export KINESIS_STREAM_ARN=<your-stream-arn>"
+if [ -z "${INPUT_DATA_BUCKET}" ]; then
+    log_error "INPUT_DATA_BUCKET is not set. Please run iac_create.sh first and source the configuration."
+    log_error "Or set it manually: export INPUT_DATA_BUCKET=<your-input-bucket>"
+    exit 1
+fi
+
+if [ -z "${OUTPUT_DATA_BUCKET}" ]; then
+    log_error "OUTPUT_DATA_BUCKET is not set. Please run iac_create.sh first and source the configuration."
+    log_error "Or set it manually: export OUTPUT_DATA_BUCKET=<your-output-bucket>"
     exit 1
 fi
 
@@ -72,10 +83,13 @@ echo ""
 log_info "Configuration:"
 echo "  - Application Name: ${APP_NAME}"
 echo "  - Application Bucket: ${STREAMING_APP_BUCKET}"
-echo "  - Data Bucket: ${DATA_BUCKET}"
+echo "  - Input Data Bucket: ${INPUT_DATA_BUCKET}"
+echo "  - Input Table: ${INPUT_DATA_BUCKET_TABLE_NAME}"
+echo "  - Output Data Bucket: ${OUTPUT_DATA_BUCKET}"
+echo "  - Output Table: ${OUTPUT_DATA_BUCKET_TABLE_NAME}"
+echo "  - CloudWatch Logs: ${LOG_GROUP}"
 echo "  - Region: ${REGION}"
 echo "  - IAM Role ARN: ${FLINK_ROLE_ARN}"
-echo "  - Kinesis Stream ARN: ${KINESIS_STREAM_ARN}"
 echo "  - Flink Version: ${FLINK_VERSION}"
 echo ""
 
@@ -114,6 +128,15 @@ fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 log_info "AWS Account ID: ${ACCOUNT_ID}"
+
+# Verify CloudWatch Log Group exists (created by iac_create.sh)
+log_info "Verifying CloudWatch Log Group exists..."
+if ! aws logs describe-log-groups --log-group-name-prefix "${LOG_GROUP}" --region "${REGION}" 2>/dev/null | grep -q "${LOG_GROUP}"; then
+    log_error "CloudWatch Log Group ${LOG_GROUP} does not exist!"
+    log_error "Please run iac_create.sh first to create the infrastructure."
+    exit 1
+fi
+log_info "CloudWatch Log Group verified: ${LOG_GROUP}"
 
 # Step 1: Build the application using Maven
 log_step "Step 1: Building Java application with Maven..."
@@ -158,63 +181,18 @@ log_step "Step 3: Creating/Updating Flink application..."
 
 # Check if application exists
 if aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" --region "${REGION}" &> /dev/null; then
-    log_info "Application ${APP_NAME} already exists. Checking status..."
+    log_info "Application ${APP_NAME} already exists. Updating..."
     
-    APP_STATUS=$(aws kinesisanalyticsv2 describe-application \
-        --application-name "${APP_NAME}" \
-        --region "${REGION}" \
-        --query 'ApplicationDetail.ApplicationStatus' \
-        --output text)
-    
+    # Get current application version
     APP_VERSION=$(aws kinesisanalyticsv2 describe-application \
         --application-name "${APP_NAME}" \
         --region "${REGION}" \
         --query 'ApplicationDetail.ApplicationVersionId' \
         --output text)
     
-    log_info "Current status: ${APP_STATUS}, Version: ${APP_VERSION}"
+    log_info "Current application version: ${APP_VERSION}"
     
-    # Stop the application if it's running
-    if [ "${APP_STATUS}" == "RUNNING" ]; then
-        log_info "Stopping application before update..."
-        aws kinesisanalyticsv2 stop-application \
-            --application-name "${APP_NAME}" \
-            --region "${REGION}" \
-            --force
-        
-        # Wait for application to stop
-        log_info "Waiting for application to stop..."
-        for i in {1..60}; do
-            APP_STATUS=$(aws kinesisanalyticsv2 describe-application \
-                --application-name "${APP_NAME}" \
-                --region "${REGION}" \
-                --query 'ApplicationDetail.ApplicationStatus' \
-                --output text)
-            
-            if [ "${APP_STATUS}" == "READY" ]; then
-                log_info "Application stopped successfully."
-                break
-            fi
-            
-            if [ $i -eq 60 ]; then
-                log_error "Timeout waiting for application to stop."
-                exit 1
-            fi
-            
-            log_info "Current status: ${APP_STATUS}. Waiting... (${i}/60)"
-            sleep 10
-        done
-        
-        # Get updated version after stopping
-        APP_VERSION=$(aws kinesisanalyticsv2 describe-application \
-            --application-name "${APP_NAME}" \
-            --region "${REGION}" \
-            --query 'ApplicationDetail.ApplicationVersionId' \
-            --output text)
-    fi
-    
-    # Update application
-    log_info "Updating application configuration..."
+    # Update the application
     aws kinesisanalyticsv2 update-application \
         --application-name "${APP_NAME}" \
         --region "${REGION}" \
@@ -230,32 +208,45 @@ if aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" 
                     }\
                 }\
             },\
+            \"FlinkApplicationConfigurationUpdate\": {\
+                \"MonitoringConfigurationUpdate\": {\
+                    \"ConfigurationTypeUpdate\": \"CUSTOM\",\
+                    \"LogLevelUpdate\": \"INFO\",\
+                    \"MetricsLevelUpdate\": \"APPLICATION\"\
+                }\
+            },\
             \"EnvironmentPropertyUpdates\": {\
                 \"PropertyGroups\": [\
                     {\
                         \"PropertyGroupId\": \"KinesisSource\",\
                         \"PropertyMap\": {\
-                            \"stream.arn\": \"${KINESIS_STREAM_ARN}\",\
                             \"aws.region\": \"${REGION}\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"S3Source\",\
+                        \"PropertyMap\": {\
+                            \"input-bucket\": \"${INPUT_DATA_BUCKET}\",\
+                            \"table\": \"${INPUT_DATA_BUCKET_TABLE_NAME}\"\
                         }\
                     },\
                     {\
                         \"PropertyGroupId\": \"S3Sink\",\
                         \"PropertyMap\": {\
-                            \"bucket\": \"${DATA_BUCKET}\",\
-                            \"table\": \"${S3_TABLE}\"\
+                            \"output-bucket\": \"${OUTPUT_DATA_BUCKET}\",\
+                            \"table\": \"${OUTPUT_DATA_BUCKET_TABLE_NAME}\"\
                         }\
                     }\
                 ]\
             }\
         }"
     
-    log_info "Application updated to READY state."
+    log_info "Application updated successfully."
     
 else
     log_info "Creating new Flink application..."
     
-    # Create the application
+    # Create the application without CloudWatch logging options (will be added separately)
     aws kinesisanalyticsv2 create-application \
         --application-name "${APP_NAME}" \
         --region "${REGION}" \
@@ -293,22 +284,28 @@ else
                     {\
                         \"PropertyGroupId\": \"KinesisSource\",\
                         \"PropertyMap\": {\
-                            \"stream.arn\": \"${KINESIS_STREAM_ARN}\",\
                             \"aws.region\": \"${REGION}\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"S3Source\",\
+                        \"PropertyMap\": {\
+                            \"input-bucket\": \"${INPUT_DATA_BUCKET}\",\
+                            \"table\": \"${INPUT_DATA_BUCKET_TABLE_NAME}\"\
                         }\
                     },\
                     {\
                         \"PropertyGroupId\": \"S3Sink\",\
                         \"PropertyMap\": {\
-                            \"bucket\": \"${DATA_BUCKET}\",\
-                            \"table\": \"${S3_TABLE}\"\
+                            \"output-bucket\": \"${OUTPUT_DATA_BUCKET}\",\
+                            \"table\": \"${OUTPUT_DATA_BUCKET_TABLE_NAME}\"\
                         }\
                     }\
                 ]\
             }\
         }"
     
-    log_info "Application created successfully in READY state."
+    log_info "Application created successfully."
     
     # Wait for application to be ready
     log_info "Waiting for application to be fully created..."
@@ -332,6 +329,23 @@ else
         log_info "Current status: ${APP_STATUS}. Waiting... (${i}/30)"
         sleep 10
     done
+    
+    # Add CloudWatch logging after application is created
+    log_info "Adding CloudWatch logging configuration..."
+    
+    APP_VERSION=$(aws kinesisanalyticsv2 describe-application \
+        --application-name "${APP_NAME}" \
+        --region "${REGION}" \
+        --query 'ApplicationDetail.ApplicationVersionId' \
+        --output text)
+    
+    aws kinesisanalyticsv2 add-application-cloud-watch-logging-option \
+        --application-name "${APP_NAME}" \
+        --region "${REGION}" \
+        --current-application-version-id ${APP_VERSION} \
+        --cloud-watch-logging-option "{\"LogStreamARN\":\"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:${LOG_GROUP}:log-stream:flink-application\"}"
+    
+    log_info "CloudWatch logging configured successfully."
 fi
 
 # Step 4: Start the application in streaming mode
@@ -375,10 +389,8 @@ for i in {1..60}; do
         log_error "Checking logs for errors..."
         
         # Try to get CloudWatch logs
-        if [ -n "${LOG_GROUP}" ] && [ -n "${LOG_STREAM}" ]; then
-            log_info "Fetching recent logs from ${LOG_GROUP}..."
-            aws logs tail "${LOG_GROUP}" --follow --since 5m --region "${REGION}" 2>/dev/null || log_warn "Could not fetch logs."
-        fi
+        log_info "Fetching recent logs from ${LOG_GROUP}..."
+        aws logs tail "${LOG_GROUP}" --follow --since 5m --region "${REGION}" 2>/dev/null || log_warn "Could not fetch logs."
         exit 1
     fi
     
@@ -388,10 +400,8 @@ for i in {1..60}; do
         log_error "Checking logs for errors..."
         
         # Try to get CloudWatch logs
-        if [ -n "${LOG_GROUP}" ] && [ -n "${LOG_STREAM}" ]; then
-            log_info "Fetching recent logs from ${LOG_GROUP}..."
-            aws logs tail "${LOG_GROUP}" --follow --since 5m --region "${REGION}" 2>/dev/null || log_warn "Could not fetch logs."
-        fi
+        log_info "Fetching recent logs from ${LOG_GROUP}..."
+        aws logs tail "${LOG_GROUP}" --follow --since 5m --region "${REGION}" 2>/dev/null || log_warn "Could not fetch logs."
         exit 1
     fi
     
@@ -423,37 +433,36 @@ echo "  - Region: ${REGION}"
 echo ""
 log_info "Application Resources:"
 echo "  - Application Code: s3://${STREAMING_APP_BUCKET}/${S3_JAR_KEY}"
-echo "  - Data Output: s3://${DATA_BUCKET}/datafall/"
-if [ -n "${LOG_GROUP}" ]; then
-    echo "  - CloudWatch Logs: ${LOG_GROUP}"
-fi
+echo "  - Data Input: s3://${INPUT_DATA_BUCKET}/${INPUT_DATA_BUCKET_TABLE_NAME}/"
+echo "  - Data Output: s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/"
+echo "  - CloudWatch Logs: ${LOG_GROUP}"
 echo ""
 log_info "Monitoring Commands:"
 echo "  - View application status:"
 echo "    aws kinesisanalyticsv2 describe-application --application-name ${APP_NAME} --region ${REGION}"
 echo ""
 echo "  - View CloudWatch logs:"
-if [ -n "${LOG_GROUP}" ]; then
-    echo "    aws logs tail ${LOG_GROUP} --follow --region ${REGION}"
-fi
+echo "    aws logs tail ${LOG_GROUP} --follow --region ${REGION}"
+echo ""
+echo "  - List input files in S3:"
+echo "    aws s3 ls s3://${INPUT_DATA_BUCKET}/${INPUT_DATA_BUCKET_TABLE_NAME}/ --recursive --region ${REGION}"
 echo ""
 echo "  - List output files in S3:"
-echo "    aws s3 ls s3://${DATA_BUCKET}/datafall/ --recursive --region ${REGION}"
+echo "    aws s3 ls s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/ --recursive --region ${REGION}"
 echo ""
 echo "  - Download output files:"
-echo "    aws s3 sync s3://${DATA_BUCKET}/datafall/ ./output/ --region ${REGION}"
+echo "    aws s3 sync s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/ ./output/ --region ${REGION}"
 echo ""
 log_info "To stop the application:"
 echo "  aws kinesisanalyticsv2 stop-application --application-name ${APP_NAME} --region ${REGION}"
 echo ""
 
 # Tail logs for a few seconds to show initial output
-if [ -n "${LOG_GROUP}" ]; then
-    log_info "Showing initial application logs (10 seconds)..."
-    echo ""
-    timeout 10 aws logs tail "${LOG_GROUP}" --follow --region "${REGION}" 2>/dev/null || true
-    echo ""
-fi
+log_info "Showing initial application logs (10 seconds)..."
+echo ""
+timeout 10 aws logs tail "${LOG_GROUP}" --follow --region "${REGION}" 2>/dev/null || true
+echo ""
 
 log_info "Deployment completed successfully!"
-log_info "The application is now processing data and writing to s3://${DATA_BUCKET}/datafall/"
+log_info "The application is now monitoring s3://${INPUT_DATA_BUCKET}/${INPUT_DATA_BUCKET_TABLE_NAME}/ for new files"
+log_info "Processed data will be written to s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/"

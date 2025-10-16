@@ -21,9 +21,10 @@ log_section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 APP_NAME="${APP_NAME:-datahose-app}"
 # Auto-detect latest dynamic S3 buckets by prefix and creation date
 STREAMING_APP_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-streaming-app-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
-DATA_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-data-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
-TABLE_NAME="datafall"
-KINESIS_STREAM_NAME="${KINESIS_STREAM_NAME:-tm-input-stream}"
+INPUT_DATA_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-input-data-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
+OUTPUT_DATA_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-output-data-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
+INPUT_TABLE_NAME="datafall"
+OUTPUT_TABLE_NAME="datalake"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -31,7 +32,7 @@ if [ -z "$REGION" ]; then
     exit 1
 fi
 IAM_ROLE_NAME="${APP_NAME}-flink-role"
-USER_POLICY_NAME="${APP_NAME}-kinesis-producer-policy"
+USER_POLICY_NAME="${APP_NAME}-s3-upload-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
 
 echo "╔════════════════════════════════════════════════════════╗"
@@ -72,45 +73,47 @@ else
     log_error "Application bucket not found: ${STREAMING_APP_BUCKET}"
 fi
 
-if [ -n "${DATA_BUCKET}" ] && aws s3 ls "s3://${DATA_BUCKET}" &> /dev/null; then
-    log_info "Data bucket exists: ${DATA_BUCKET}"
-    if aws s3 ls "s3://${DATA_BUCKET}/${TABLE_NAME}/" &> /dev/null; then
-        log_info "Table folder exists: ${TABLE_NAME}"
-        FILE_COUNT=$(aws s3 ls "s3://${DATA_BUCKET}/${TABLE_NAME}/" --recursive --region "${REGION}" | wc -l)
-        log_info "Files in table: ${FILE_COUNT}"
+if [ -n "${INPUT_DATA_BUCKET}" ] && aws s3 ls "s3://${INPUT_DATA_BUCKET}" &> /dev/null; then
+    log_info "Input data bucket exists: ${INPUT_DATA_BUCKET}"
+    if aws s3 ls "s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/" &> /dev/null; then
+        log_info "Input table folder exists: ${INPUT_TABLE_NAME}"
+        FILE_COUNT=$(aws s3 ls "s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/" --recursive --region "${REGION}" | wc -l)
+        log_info "Files in input table: ${FILE_COUNT}"
         if [ ${FILE_COUNT} -gt 0 ]; then
             echo ""
             echo "    Recent files:"
-            aws s3 ls "s3://${DATA_BUCKET}/${TABLE_NAME}/" --recursive --region "${REGION}" | tail -5 | sed 's/^/    /'
+            aws s3 ls "s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/" --recursive --region "${REGION}" | tail -5 | sed 's/^/    /'
         fi
     else
-        log_warn "Table folder not found: ${TABLE_NAME}"
+        log_warn "Input table folder not found: ${INPUT_TABLE_NAME}"
     fi
 else
-    log_error "Data bucket not found: ${DATA_BUCKET}"
+    log_error "Input data bucket not found: ${INPUT_DATA_BUCKET}"
 fi
 
-# Check Kinesis Data Stream
-log_section "Kinesis Data Stream"
-
-if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
-    log_info "Kinesis stream exists: ${KINESIS_STREAM_NAME}"
-    
-    STREAM_STATUS=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamStatus' --output text)
-    SHARD_COUNT=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.Shards | length(@)' --output text)
-    STREAM_ARN=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamARN' --output text)
-    
-    if [ "${STREAM_STATUS}" == "ACTIVE" ]; then
-        log_info "Stream status: ${STREAM_STATUS} ✓"
+if [ -n "${OUTPUT_DATA_BUCKET}" ] && aws s3 ls "s3://${OUTPUT_DATA_BUCKET}" &> /dev/null; then
+    log_info "Output data bucket exists: ${OUTPUT_DATA_BUCKET}"
+    if aws s3 ls "s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/" &> /dev/null; then
+        log_info "Output table folder exists: ${OUTPUT_TABLE_NAME}"
+        FILE_COUNT=$(aws s3 ls "s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/" --recursive --region "${REGION}" | wc -l)
+        log_info "Files in output table: ${FILE_COUNT}"
+        if [ ${FILE_COUNT} -gt 0 ]; then
+            echo ""
+            echo "    Recent files:"
+            aws s3 ls "s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/" --recursive --region "${REGION}" | tail -5 | sed 's/^/    /'
+        fi
     else
-        log_warn "Stream status: ${STREAM_STATUS}"
+        log_warn "Output table folder not found: ${OUTPUT_TABLE_NAME}"
     fi
-    
-    log_info "Shard count: ${SHARD_COUNT}"
-    log_info "Stream ARN: ${STREAM_ARN}"
 else
-    log_error "Kinesis stream not found: ${KINESIS_STREAM_NAME}"
+    log_error "Output data bucket not found: ${OUTPUT_DATA_BUCKET}"
 fi
+
+# Kinesis Data Stream is no longer used in S3-to-S3 architecture
+log_section "Data Streaming Architecture"
+log_info "Architecture: S3-to-S3 (File-based streaming)"
+log_info "Input: ${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/"
+log_info "Output: ${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/"
 
 # Check IAM Role
 log_section "IAM Resources"
@@ -207,13 +210,12 @@ fi
 # Summary
 log_section "Summary"
 
-TOTAL_CHECKS=8
+TOTAL_CHECKS=7
 PASSED=0
 
 aws s3 ls "s3://${STREAMING_APP_BUCKET}" &> /dev/null && ((PASSED++))
-aws s3 ls "s3://${DATA_BUCKET}" &> /dev/null && ((PASSED++))
-aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null && ((PASSED++))
-[ "${STREAM_STATUS}" == "ACTIVE" ] && ((PASSED++))
+aws s3 ls "s3://${INPUT_DATA_BUCKET}" &> /dev/null && ((PASSED++))
+aws s3 ls "s3://${OUTPUT_DATA_BUCKET}" &> /dev/null && ((PASSED++))
 aws iam get-role --role-name "${IAM_ROLE_NAME}" &> /dev/null && ((PASSED++))
 aws logs describe-log-groups --log-group-name-prefix "${LOG_GROUP_NAME}" --region "${REGION}" | grep -q "${LOG_GROUP_NAME}" && ((PASSED++))
 aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" --region "${REGION}" &> /dev/null && ((PASSED++))
@@ -228,9 +230,9 @@ if [ ${PASSED} -eq ${TOTAL_CHECKS} ]; then
     echo ""
     echo "Useful commands:"
     echo "  - View live logs: aws logs tail ${LOG_GROUP_NAME} --follow --region ${REGION}"
-    echo "  - List output: aws s3 ls s3://${DATA_BUCKET}/${TABLE_NAME}/ --recursive --region ${REGION}"
-    echo "  - Monitor Kinesis: aws kinesis describe-stream --stream-name ${KINESIS_STREAM_NAME} --region ${REGION}"
-    echo "  - Send test data: ./test.sh"
+    echo "  - List input files: aws s3 ls s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/ --recursive --region ${REGION}"
+    echo "  - List output files: aws s3 ls s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/ --recursive --region ${REGION}"
+    echo "  - Upload test data: ./test.sh"
     echo "  - Stop app: aws kinesisanalyticsv2 stop-application --application-name ${APP_NAME} --region ${REGION}"
     exit 0
 elif [ ${PASSED} -ge 5 ]; then
