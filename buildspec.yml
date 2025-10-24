@@ -98,23 +98,28 @@ phases:
       - echo "Creating/Updating Flink application..."
       - |
         # Check if application exists
-        if aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" &> /dev/null; then
+        set +e
+        aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" > /dev/null 2>&1
+        APP_EXISTS=$?
+        set -e
+        
+        if [ $APP_EXISTS -eq 0 ]; then
           echo "Application $APP_NAME already exists. Checking status..."
           
-          export APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text)
-          export APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationVersionId' --output text)
+          export APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationStatus' --output text)
+          export APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationVersionId' --output text)
           
           echo "Current status: $APP_STATUS, Version: $APP_VERSION"
           
           # Stop the application if it's running
           if [ "$APP_STATUS" == "RUNNING" ]; then
             echo "Stopping application before update..."
-            aws kinesisanalyticsv2 stop-application --application-name "$APP_NAME" --force
+            aws kinesisanalyticsv2 stop-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --force
             
             # Wait for application to stop
             echo "Waiting for application to stop..."
             for i in {1..60}; do
-              APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text)
+              APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationStatus' --output text)
               
               if [ "$APP_STATUS" == "READY" ]; then
                 echo "Application stopped successfully."
@@ -131,14 +136,15 @@ phases:
             done
             
             # Get updated version after stopping
-            APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationVersionId' --output text)
+            APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationVersionId' --output text)
           fi
           
           # Update application
           echo "Updating application configuration..."
           aws kinesisanalyticsv2 update-application \
             --application-name "$APP_NAME" \
-            --current-application-version-id $APP_VERSION \
+            --region "$AWS_DEFAULT_REGION" \
+            --current-application-version-id "$APP_VERSION" \
             --application-configuration-update "{
               \"ApplicationCodeConfigurationUpdate\": {
                 \"CodeContentTypeUpdate\": \"ZIPFILE\",
@@ -177,6 +183,7 @@ phases:
           # Create the application
           aws kinesisanalyticsv2 create-application \
             --application-name "$APP_NAME" \
+            --region "$AWS_DEFAULT_REGION" \
             --runtime-environment "$RUNTIME_ENVIRONMENT" \
             --service-execution-role "$FLINK_ROLE_ARN" \
             --application-configuration "{
@@ -231,7 +238,7 @@ phases:
           # Wait for application to be ready
           echo "Waiting for application to be fully created..."
           for i in {1..30}; do
-            APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text 2>/dev/null || echo "CREATING")
+            APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationStatus' --output text 2>/dev/null || echo "CREATING")
             
             if [ "$APP_STATUS" == "READY" ]; then
               echo "Application is ready."
@@ -250,12 +257,13 @@ phases:
       
       # Start the application
       - echo "Starting Flink application in STREAMING mode..."
-      - export APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationVersionId' --output text)
+      - export APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationVersionId' --output text)
       - echo "Starting application with version $APP_VERSION..."
       
       - |
         aws kinesisanalyticsv2 start-application \
           --application-name "$APP_NAME" \
+          --region "$AWS_DEFAULT_REGION" \
           --run-configuration "{
             \"FlinkRunConfiguration\": {
               \"AllowNonRestoredState\": true
@@ -265,7 +273,7 @@ phases:
       - echo "Start command issued. Waiting for application to reach RUNNING state..."
       - |
         for i in {1..60}; do
-          APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text)
+          APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationStatus' --output text)
           
           if [ "$APP_STATUS" == "RUNNING" ]; then
             echo "Application is now RUNNING!"
@@ -289,7 +297,7 @@ phases:
       
       # Get final application details
       - echo "Deployment completed successfully!"
-      - export APP_ARN=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationARN' --output text)
+      - export APP_ARN=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --region "$AWS_DEFAULT_REGION" --query 'ApplicationDetail.ApplicationARN' --output text)
       - echo "Application ARN - $APP_ARN"
       - echo "Application Status - RUNNING"
       - echo "Data Output - s3://$DATA_BUCKET/$S3_TABLE/"
