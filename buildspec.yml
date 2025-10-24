@@ -1,0 +1,306 @@
+version: 0.2
+
+# AWS CodeBuild buildspec for Flink Streaming Application
+# This buildspec mimics the functionality of cicd.sh:
+# 1. Build Java application with Maven
+# 2. Upload JAR to S3
+# 3. Create/Update Flink application
+# 4. Start the application in streaming mode
+
+phases:
+  install:
+    runtime-versions:
+      java: corretto11
+    commands:
+      - echo "Installing dependencies..."
+      - java -version
+      - mvn -version
+      - aws --version
+      
+  pre_build:
+    commands:
+      - echo "Pre-build phase started on `date`"
+      - echo "Verifying AWS credentials..."
+      - aws sts get-caller-identity
+      - export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - echo "Account ID - $ACCOUNT_ID"
+      - echo "Region - $AWS_DEFAULT_REGION"
+      
+      # Load environment variables from CloudFormation stack outputs
+      - |
+        if [ -n "$INFRASTRUCTURE_STACK_NAME" ]; then
+          echo "Loading configuration from CloudFormation stack: $INFRASTRUCTURE_STACK_NAME"
+          export STREAMING_APP_BUCKET=$(aws cloudformation describe-stacks --stack-name $INFRASTRUCTURE_STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`StreamingAppBucketName`].OutputValue' --output text)
+          export DATA_BUCKET=$(aws cloudformation describe-stacks --stack-name $INFRASTRUCTURE_STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`DataBucketName`].OutputValue' --output text)
+          export KINESIS_STREAM_ARN=$(aws cloudformation describe-stacks --stack-name $INFRASTRUCTURE_STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`KinesisStreamArn`].OutputValue' --output text)
+          export FLINK_ROLE_ARN=$(aws cloudformation describe-stacks --stack-name $INFRASTRUCTURE_STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`FlinkRoleArn`].OutputValue' --output text)
+          export LOG_GROUP=$(aws cloudformation describe-stacks --stack-name $INFRASTRUCTURE_STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`FlinkLogGroupName`].OutputValue' --output text)
+          export S3_TABLE=$(aws cloudformation describe-stacks --stack-name $INFRASTRUCTURE_STACK_NAME --query 'Stacks[0].Outputs[?OutputKey==`TableName`].OutputValue' --output text)
+          echo "Configuration loaded successfully"
+        else
+          echo "ERROR: INFRASTRUCTURE_STACK_NAME environment variable not set"
+          exit 1
+        fi
+      
+      # Set default values
+      - export APP_NAME=${APP_NAME:-datahose-app}
+      - export JAR_FILE="target/${APP_NAME}.jar"
+      - export S3_JAR_KEY="${APP_NAME}.jar"
+      - export FLINK_VERSION="FLINK-1_20"
+      - export RUNTIME_ENVIRONMENT="FLINK-1_20"
+      
+      - echo "Build Configuration:"
+      - echo "  Application Name - $APP_NAME"
+      - echo "  JAR File - $JAR_FILE"
+      - echo "  Streaming App Bucket - $STREAMING_APP_BUCKET"
+      - echo "  Data Bucket - $DATA_BUCKET"
+      - echo "  S3 Table - $S3_TABLE"
+      - echo "  Kinesis Stream ARN - $KINESIS_STREAM_ARN"
+      - echo "  Flink Role ARN - $FLINK_ROLE_ARN"
+      
+  build:
+    commands:
+      - echo "Build phase started on `date`"
+      - echo "Building Java application with Maven..."
+      - mvn clean package -DskipTests
+      
+      - |
+        if [ ! -f "$JAR_FILE" ]; then
+          echo "ERROR: Build failed! JAR file not found: $JAR_FILE"
+          exit 1
+        fi
+      
+      - export JAR_SIZE=$(du -h "$JAR_FILE" | cut -f1)
+      - echo "Build successful! JAR file - $JAR_FILE ($JAR_SIZE)"
+      
+      # Verify JAR size is under 512MB
+      - export JAR_SIZE_BYTES=$(stat -c%s "$JAR_FILE")
+      - export MAX_SIZE_BYTES=$((512 * 1024 * 1024))
+      - |
+        if [ $JAR_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
+          echo "ERROR: JAR file size ($JAR_SIZE) exceeds the 512MB limit for Managed Service for Apache Flink!"
+          exit 1
+        fi
+      
+  post_build:
+    commands:
+      - echo "Post-build phase started on `date`"
+      
+      # Upload JAR to S3
+      - echo "Uploading JAR to S3 bucket - $STREAMING_APP_BUCKET..."
+      - aws s3 cp "$JAR_FILE" "s3://$STREAMING_APP_BUCKET/$S3_JAR_KEY"
+      
+      # Get S3 object version
+      - export S3_OBJECT_VERSION=$(aws s3api head-object --bucket "$STREAMING_APP_BUCKET" --key "$S3_JAR_KEY" --query 'VersionId' --output text)
+      - echo "JAR uploaded successfully. Object version - $S3_OBJECT_VERSION"
+      
+      # Create or update Flink application
+      - echo "Creating/Updating Flink application..."
+      - |
+        # Check if application exists
+        if aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" &> /dev/null; then
+          echo "Application $APP_NAME already exists. Checking status..."
+          
+          export APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text)
+          export APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationVersionId' --output text)
+          
+          echo "Current status: $APP_STATUS, Version: $APP_VERSION"
+          
+          # Stop the application if it's running
+          if [ "$APP_STATUS" == "RUNNING" ]; then
+            echo "Stopping application before update..."
+            aws kinesisanalyticsv2 stop-application --application-name "$APP_NAME" --force
+            
+            # Wait for application to stop
+            echo "Waiting for application to stop..."
+            for i in {1..60}; do
+              APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text)
+              
+              if [ "$APP_STATUS" == "READY" ]; then
+                echo "Application stopped successfully."
+                break
+              fi
+              
+              if [ $i -eq 60 ]; then
+                echo "ERROR: Timeout waiting for application to stop."
+                exit 1
+              fi
+              
+              echo "Current status: $APP_STATUS. Waiting... ($i/60)"
+              sleep 10
+            done
+            
+            # Get updated version after stopping
+            APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationVersionId' --output text)
+          fi
+          
+          # Update application
+          echo "Updating application configuration..."
+          aws kinesisanalyticsv2 update-application \
+            --application-name "$APP_NAME" \
+            --current-application-version-id $APP_VERSION \
+            --application-configuration-update "{
+              \"ApplicationCodeConfigurationUpdate\": {
+                \"CodeContentTypeUpdate\": \"ZIPFILE\",
+                \"CodeContentUpdate\": {
+                  \"S3ContentLocationUpdate\": {
+                    \"BucketARNUpdate\": \"arn:aws:s3:::$STREAMING_APP_BUCKET\",
+                    \"FileKeyUpdate\": \"$S3_JAR_KEY\",
+                    \"ObjectVersionUpdate\": \"$S3_OBJECT_VERSION\"
+                  }
+                }
+              },
+              \"EnvironmentPropertyUpdates\": {
+                \"PropertyGroups\": [
+                  {
+                    \"PropertyGroupId\": \"KinesisSource\",
+                    \"PropertyMap\": {
+                      \"stream.arn\": \"$KINESIS_STREAM_ARN\",
+                      \"aws.region\": \"$AWS_DEFAULT_REGION\"
+                    }
+                  },
+                  {
+                    \"PropertyGroupId\": \"S3Sink\",
+                    \"PropertyMap\": {
+                      \"bucket\": \"$DATA_BUCKET\",
+                      \"table\": \"$S3_TABLE\"
+                    }
+                  }
+                ]
+              }
+            }"
+          
+          echo "Application updated to READY state."
+        else
+          echo "Creating new Flink application..."
+          
+          # Create the application
+          aws kinesisanalyticsv2 create-application \
+            --application-name "$APP_NAME" \
+            --runtime-environment "$RUNTIME_ENVIRONMENT" \
+            --service-execution-role "$FLINK_ROLE_ARN" \
+            --application-configuration "{
+              \"ApplicationCodeConfiguration\": {
+                \"CodeContent\": {
+                  \"S3ContentLocation\": {
+                    \"BucketARN\": \"arn:aws:s3:::$STREAMING_APP_BUCKET\",
+                    \"FileKey\": \"$S3_JAR_KEY\",
+                    \"ObjectVersion\": \"$S3_OBJECT_VERSION\"
+                  }
+                },
+                \"CodeContentType\": \"ZIPFILE\"
+              },
+              \"FlinkApplicationConfiguration\": {
+                \"CheckpointConfiguration\": {
+                  \"ConfigurationType\": \"DEFAULT\"
+                },
+                \"MonitoringConfiguration\": {
+                  \"ConfigurationType\": \"CUSTOM\",
+                  \"MetricsLevel\": \"APPLICATION\",
+                  \"LogLevel\": \"INFO\"
+                },
+                \"ParallelismConfiguration\": {
+                  \"ConfigurationType\": \"CUSTOM\",
+                  \"Parallelism\": 1,
+                  \"ParallelismPerKPU\": 1,
+                  \"AutoScalingEnabled\": false
+                }
+              },
+              \"EnvironmentProperties\": {
+                \"PropertyGroups\": [
+                  {
+                    \"PropertyGroupId\": \"KinesisSource\",
+                    \"PropertyMap\": {
+                      \"stream.arn\": \"$KINESIS_STREAM_ARN\",
+                      \"aws.region\": \"$AWS_DEFAULT_REGION\"
+                    }
+                  },
+                  {
+                    \"PropertyGroupId\": \"S3Sink\",
+                    \"PropertyMap\": {
+                      \"bucket\": \"$DATA_BUCKET\",
+                      \"table\": \"$S3_TABLE\"
+                    }
+                  }
+                ]
+              }
+            }"
+          
+          echo "Application created successfully in READY state."
+          
+          # Wait for application to be ready
+          echo "Waiting for application to be fully created..."
+          for i in {1..30}; do
+            APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text 2>/dev/null || echo "CREATING")
+            
+            if [ "$APP_STATUS" == "READY" ]; then
+              echo "Application is ready."
+              break
+            fi
+            
+            if [ $i -eq 30 ]; then
+              echo "ERROR: Timeout waiting for application to be ready."
+              exit 1
+            fi
+            
+            echo "Current status: $APP_STATUS. Waiting... ($i/30)"
+            sleep 10
+          done
+        fi
+      
+      # Start the application
+      - echo "Starting Flink application in STREAMING mode..."
+      - export APP_VERSION=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationVersionId' --output text)
+      - echo "Starting application with version $APP_VERSION..."
+      
+      - |
+        aws kinesisanalyticsv2 start-application \
+          --application-name "$APP_NAME" \
+          --run-configuration "{
+            \"FlinkRunConfiguration\": {
+              \"AllowNonRestoredState\": true
+            }
+          }"
+      
+      - echo "Start command issued. Waiting for application to reach RUNNING state..."
+      - |
+        for i in {1..60}; do
+          APP_STATUS=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationStatus' --output text)
+          
+          if [ "$APP_STATUS" == "RUNNING" ]; then
+            echo "Application is now RUNNING!"
+            break
+          fi
+          
+          if [ "$APP_STATUS" == "STOPPING" ] || [ "$APP_STATUS" == "DELETING" ]; then
+            echo "ERROR: Application entered unexpected state: $APP_STATUS"
+            exit 1
+          fi
+          
+          if [ $i -eq 60 ]; then
+            echo "ERROR: Timeout waiting for application to start."
+            echo "Current status: $APP_STATUS"
+            exit 1
+          fi
+          
+          echo "Current status: $APP_STATUS. Waiting... ($i/60)"
+          sleep 10
+        done
+      
+      # Get final application details
+      - echo "Deployment completed successfully!"
+      - export APP_ARN=$(aws kinesisanalyticsv2 describe-application --application-name "$APP_NAME" --query 'ApplicationDetail.ApplicationARN' --output text)
+      - echo "Application ARN - $APP_ARN"
+      - echo "Application Status - RUNNING"
+      - echo "Data Output - s3://$DATA_BUCKET/$S3_TABLE/"
+      
+      - echo "Build completed on `date`"
+
+artifacts:
+  files:
+    - target/*.jar
+  name: FlinkApplication
+
+cache:
+  paths:
+    - '/root/.m2/**/*'

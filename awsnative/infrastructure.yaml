@@ -1,0 +1,304 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Infrastructure for Flink Streaming Application - Creates S3 buckets, Kinesis stream, IAM roles, and CloudWatch resources'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: datahose-app
+    Description: Name of the Flink application
+    
+  TableName:
+    Type: String
+    Default: datafall
+    Description: S3 table name (folder) for data sink
+    
+  KinesisStreamName:
+    Type: String
+    Default: tm-input-stream
+    Description: Name of the Kinesis Data Stream
+    
+  KinesisShardCount:
+    Type: Number
+    Default: 1
+    Description: Number of shards for the Kinesis stream
+    MinValue: 1
+    
+  LogRetentionDays:
+    Type: Number
+    Default: 7
+    Description: CloudWatch log retention in days
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    
+  KinesisProducerUserName:
+    Type: String
+    Default: sunny0524
+    Description: IAM user name for Kinesis producer (leave empty to skip user policy attachment)
+
+Conditions:
+  AttachUserPolicy: !Not [!Equals [!Ref KinesisProducerUserName, '']]
+
+Resources:
+  # ==================== S3 BUCKETS ====================
+  
+  StreamingAppBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'tm-streaming-app-bucket-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Purpose
+          Value: Flink Application JAR Storage
+
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'tm-data-bucket-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Purpose
+          Value: Flink Data Sink Storage
+
+  # ==================== KINESIS STREAM ====================
+  
+  KinesisDataStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Ref KinesisStreamName
+      ShardCount: !Ref KinesisShardCount
+      RetentionPeriodHours: 24
+      StreamModeDetails:
+        StreamMode: PROVISIONED
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  # ==================== CLOUDWATCH LOGS ====================
+  
+  FlinkLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/kinesis-analytics/${ApplicationName}'
+      RetentionInDays: !Ref LogRetentionDays
+
+  FlinkLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FlinkLogGroup
+      LogStreamName: flink-application
+
+  # ==================== IAM ROLES AND POLICIES ====================
+  
+  FlinkServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-flink-role'
+      Description: !Sub 'Service role for Managed Service for Apache Flink - ${ApplicationName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: kinesisanalytics.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  FlinkServicePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ApplicationName}-flink-policy'
+      Description: !Sub 'Policy for Managed Service for Apache Flink - ${ApplicationName}'
+      Roles:
+        - !Ref FlinkServiceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Read application JAR from S3
+          - Sid: ReadApplicationJAR
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource:
+              - !Sub '${StreamingAppBucket.Arn}/*'
+          
+          - Sid: ListApplicationBucket
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt StreamingAppBucket.Arn
+          
+          # Write to data bucket
+          - Sid: WriteToDataBucket
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+            Resource:
+              - !GetAtt DataBucket.Arn
+              - !Sub '${DataBucket.Arn}/*'
+          
+          # Read from Kinesis stream
+          - Sid: ReadFromKinesisStream
+            Effect: Allow
+            Action:
+              - kinesis:DescribeStream
+              - kinesis:GetShardIterator
+              - kinesis:GetRecords
+              - kinesis:ListShards
+              - kinesis:SubscribeToShard
+              - kinesis:DescribeStreamSummary
+              - kinesis:RegisterStreamConsumer
+              - kinesis:DeregisterStreamConsumer
+              - kinesis:ListStreamConsumers
+              - kinesis:DescribeStreamConsumer
+            Resource:
+              - !GetAtt KinesisDataStream.Arn
+              - !Sub '${KinesisDataStream.Arn}/*'
+          
+          # CloudWatch Logs
+          - Sid: CloudWatchLogsAccess
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+            Resource:
+              - !GetAtt FlinkLogGroup.Arn
+              - !Sub '${FlinkLogGroup.Arn}:*'
+          
+          # CloudWatch Metrics
+          - Sid: CloudWatchMetricsAccess
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: '*'
+          
+          # VPC Access (for future VPC deployments)
+          - Sid: VPCAccess
+            Effect: Allow
+            Action:
+              - ec2:DescribeVpcs
+              - ec2:DescribeSubnets
+              - ec2:DescribeSecurityGroups
+              - ec2:DescribeDhcpOptions
+              - ec2:CreateNetworkInterface
+              - ec2:CreateNetworkInterfacePermission
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+            Resource: '*'
+
+  KinesisProducerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ApplicationName}-kinesis-producer-policy'
+      Description: !Sub 'Policy for user to write to Kinesis stream ${KinesisStreamName}'
+      Users: !If
+        - AttachUserPolicy
+        - [!Ref KinesisProducerUserName]
+        - !Ref AWS::NoValue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: WriteToKinesisStream
+            Effect: Allow
+            Action:
+              - kinesis:PutRecord
+              - kinesis:PutRecords
+              - kinesis:DescribeStream
+              - kinesis:ListShards
+            Resource:
+              - !GetAtt KinesisDataStream.Arn
+
+Outputs:
+  StreamingAppBucketName:
+    Description: S3 bucket name for Flink application JAR
+    Value: !Ref StreamingAppBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-StreamingAppBucket'
+
+  DataBucketName:
+    Description: S3 bucket name for data sink
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DataBucket'
+
+  KinesisStreamName:
+    Description: Kinesis Data Stream name
+    Value: !Ref KinesisDataStream
+    Export:
+      Name: !Sub '${AWS::StackName}-KinesisStreamName'
+
+  KinesisStreamArn:
+    Description: Kinesis Data Stream ARN
+    Value: !GetAtt KinesisDataStream.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KinesisStreamArn'
+
+  FlinkRoleArn:
+    Description: IAM Role ARN for Flink application
+    Value: !GetAtt FlinkServiceRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-FlinkRoleArn'
+
+  FlinkLogGroupName:
+    Description: CloudWatch Log Group name
+    Value: !Ref FlinkLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroup'
+
+  FlinkLogStreamName:
+    Description: CloudWatch Log Stream name
+    Value: !Ref FlinkLogStream
+    Export:
+      Name: !Sub '${AWS::StackName}-LogStream'
+
+  TableName:
+    Description: S3 table name for data output
+    Value: !Ref TableName
+    Export:
+      Name: !Sub '${AWS::StackName}-TableName'
+
+  Region:
+    Description: AWS Region
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${AWS::StackName}-Region'
+
+  AccountId:
+    Description: AWS Account ID
+    Value: !Ref AWS::AccountId
+    Export:
+      Name: !Sub '${AWS::StackName}-AccountId'

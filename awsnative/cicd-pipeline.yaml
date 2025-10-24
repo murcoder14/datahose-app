@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CI/CD Pipeline for Flink Streaming Application using CodePipeline and CodeBuild'
+
+Parameters:
+  ApplicationName:
+    Type: String
+    Default: datahose-app
+    Description: Name of the Flink application
+    
+  InfrastructureStackName:
+    Type: String
+    Default: datahose-app-infrastructure
+    Description: Name of the CloudFormation stack containing the infrastructure resources
+    
+  GitHubOwner:
+    Type: String
+    Description: GitHub repository owner (username or organization)
+    
+  GitHubRepo:
+    Type: String
+    Default: datahose-app
+    Description: GitHub repository name
+    
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch to build from
+    
+  GitHubTokenSecretName:
+    Type: String
+    Default: github/personal-access-token
+    Description: Name of the AWS Secrets Manager secret containing the GitHub personal access token
+    
+  BuildComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_SMALL
+    Description: CodeBuild compute type
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+      
+  BuildImage:
+    Type: String
+    Default: aws/codebuild/standard:7.0
+    Description: CodeBuild Docker image
+
+Resources:
+  # ==================== S3 BUCKET FOR PIPELINE ARTIFACTS ====================
+  
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ApplicationName}-pipeline-artifacts-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+        - Key: Purpose
+          Value: CI/CD Pipeline Artifacts
+
+  # ==================== IAM ROLES ====================
+  
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codebuild-role'
+      Description: Service role for CodeBuild to build and deploy Flink application
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  CodeBuildServicePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ApplicationName}-codebuild-policy'
+      Description: Policy for CodeBuild to access required AWS services
+      Roles:
+        - !Ref CodeBuildServiceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Access for artifacts and application buckets
+          - Sid: S3ArtifactAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+            Resource:
+              - !Sub '${ArtifactBucket.Arn}/*'
+          
+          - Sid: S3BucketAccess
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+          
+          # Access to infrastructure stack resources
+          - Sid: S3InfrastructureAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub 
+                - 'arn:aws:s3:::${BucketName}'
+                - BucketName: !ImportValue 
+                    Fn::Sub: '${InfrastructureStackName}-StreamingAppBucket'
+              - !Sub 
+                - 'arn:aws:s3:::${BucketName}/*'
+                - BucketName: !ImportValue 
+                    Fn::Sub: '${InfrastructureStackName}-StreamingAppBucket'
+          
+          # CloudFormation Read Access
+          - Sid: CloudFormationReadAccess
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResource
+              - cloudformation:DescribeStackResources
+              - cloudformation:GetTemplate
+              - cloudformation:ListStackResources
+            Resource:
+              - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${InfrastructureStackName}/*'
+          
+          # Kinesis Analytics Access
+          - Sid: KinesisAnalyticsAccess
+            Effect: Allow
+            Action:
+              - kinesisanalytics:CreateApplication
+              - kinesisanalytics:DescribeApplication
+              - kinesisanalytics:UpdateApplication
+              - kinesisanalytics:StartApplication
+              - kinesisanalytics:StopApplication
+              - kinesisanalytics:DeleteApplication
+              - kinesisanalytics:ListApplications
+              - kinesisanalytics:AddApplicationInput
+              - kinesisanalytics:AddApplicationOutput
+            Resource:
+              - !Sub 'arn:aws:kinesisanalytics:${AWS::Region}:${AWS::AccountId}:application/${ApplicationName}'
+          
+          - Sid: KinesisAnalyticsV2Access
+            Effect: Allow
+            Action:
+              - kinesisanalyticsv2:CreateApplication
+              - kinesisanalyticsv2:DescribeApplication
+              - kinesisanalyticsv2:UpdateApplication
+              - kinesisanalyticsv2:StartApplication
+              - kinesisanalyticsv2:StopApplication
+              - kinesisanalyticsv2:DeleteApplication
+              - kinesisanalyticsv2:ListApplications
+              - kinesisanalyticsv2:ListApplicationVersions
+              - kinesisanalyticsv2:DescribeApplicationVersion
+              - kinesisanalyticsv2:CreateApplicationSnapshot
+              - kinesisanalyticsv2:DeleteApplicationSnapshot
+            Resource:
+              - !Sub 'arn:aws:kinesisanalytics:${AWS::Region}:${AWS::AccountId}:application/${ApplicationName}'
+          
+          # IAM PassRole for Flink service role
+          - Sid: IAMPassRole
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !ImportValue 
+                  Fn::Sub: '${InfrastructureStackName}-FlinkRoleArn'
+          
+          # CloudWatch Logs
+          - Sid: CloudWatchLogsAccess
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - logs:DescribeLogGroups
+              - logs:DescribeLogStreams
+            Resource:
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ApplicationName}-*'
+              - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesis-analytics/${ApplicationName}*'
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ApplicationName}-codepipeline-role'
+      Description: Service role for CodePipeline
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  CodePipelineServicePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${ApplicationName}-codepipeline-policy'
+      Description: Policy for CodePipeline to orchestrate the build
+      Roles:
+        - !Ref CodePipelineServiceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # S3 Artifact Access - Full permissions on artifact bucket
+          - Sid: S3ArtifactBucketAccess
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetBucketVersioning
+              - s3:ListBucket
+              - s3:ListBucketVersions
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+          
+          - Sid: S3ArtifactObjectAccess
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource:
+              - !Sub '${ArtifactBucket.Arn}/*'
+          
+          # CodeBuild Access
+          - Sid: CodeBuildAccess
+            Effect: Allow
+            Action:
+              - codebuild:BatchGetBuilds
+              - codebuild:StartBuild
+              - codebuild:StopBuild
+            Resource:
+              - !GetAtt CodeBuildProject.Arn
+          
+          # Secrets Manager (for GitHub token)
+          - Sid: SecretsManagerAccess
+            Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${GitHubTokenSecretName}*'
+
+  # ==================== CODEBUILD PROJECT ====================
+  
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub '${ApplicationName}-build'
+      Description: !Sub 'Build and deploy ${ApplicationName} Flink application'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref BuildComputeType
+        Image: !Ref BuildImage
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: APP_NAME
+            Value: !Ref ApplicationName
+          - Name: INFRASTRUCTURE_STACK_NAME
+            Value: !Ref InfrastructureStackName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+      Cache:
+        Type: S3
+        Location: !Sub '${ArtifactBucket}/build-cache'
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Sub '/aws/codebuild/${ApplicationName}-build'
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  # ==================== CODEPIPELINE ====================
+  
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub '${ApplicationName}-pipeline'
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        # Source Stage - GitHub
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Sub '{{resolve:secretsmanager:${GitHubTokenSecretName}:SecretString:token}}'
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: SourceOutput
+        
+        # Build Stage - CodeBuild
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+      Tags:
+        - Key: Application
+          Value: !Ref ApplicationName
+
+  # ==================== GITHUB WEBHOOK ====================
+  
+  GitHubWebhook:
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: !Sub '{{resolve:secretsmanager:${GitHubTokenSecretName}:SecretString:token}}'
+      Filters:
+        - JsonPath: $.ref
+          MatchEquals: !Sub 'refs/heads/${GitHubBranch}'
+      TargetPipeline: !Ref Pipeline
+      TargetAction: SourceAction
+      TargetPipelineVersion: !GetAtt Pipeline.Version
+      RegisterWithThirdParty: true
+
+Outputs:
+  PipelineName:
+    Description: Name of the CodePipeline
+    Value: !Ref Pipeline
+    Export:
+      Name: !Sub '${AWS::StackName}-PipelineName'
+
+  PipelineUrl:
+    Description: URL of the CodePipeline in AWS Console
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view'
+
+  CodeBuildProjectName:
+    Description: Name of the CodeBuild project
+    Value: !Ref CodeBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-CodeBuildProject'
+
+  CodeBuildProjectUrl:
+    Description: URL of the CodeBuild project in AWS Console
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/projects/${CodeBuildProject}'
+
+  ArtifactBucketName:
+    Description: S3 bucket for pipeline artifacts
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ArtifactBucket'
