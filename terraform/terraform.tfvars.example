@@ -1,0 +1,40 @@
+# Terraform Variables Configuration
+# Copy this file to terraform.tfvars and customize for your environment
+
+# AWS Configuration
+aws_region = "us-east-2"
+environment = "dev"
+
+# Application Configuration
+app_name = "datahose-app"
+
+# S3 Configuration
+# Leave bucket_suffix empty to auto-generate (format: YYYYMMDD-<random>)
+bucket_suffix = ""
+input_table_name  = "datafall"
+output_table_name = "datalake"
+
+# Flink Configuration
+flink_version    = "FLINK-1_20"
+flink_parallelism = 1
+
+# CloudWatch Configuration
+cloudwatch_log_retention_days = 7
+
+# GitHub Configuration (for CodePipeline)
+github_repo_owner = "murcoder14"
+github_repo_name  = "datahose-app"
+github_branch     = "main"
+
+# GitHub Token Secret ARN
+# Create a CodeStar Connection or store GitHub PAT in Secrets Manager
+# Then provide the ARN here
+github_token_secret_arn = ""
+
+# Tags
+tags = {
+  Project     = "DataHose"
+  Environment = "dev"
+  ManagedBy   = "Terraform"
+  Owner       = "tmurali"
+}

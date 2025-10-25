@@ -35,8 +35,25 @@ Thumbs.db
 .aws/
 /tmp/flink-config.env
 
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/terraform.tfvars
+terraform/modules/lambda/lambda_package.zip
+terraform/terraform-graph.png
+
+# Lambda
+lambda/__pycache__/
+lambda/*.pyc
+*.zip
+
 # Java
 *.class
 *.jar
 !target/datahose-app.jar
 hs_err_pid*
+.project
+.classpath
+.settings
