@@ -36,8 +36,7 @@ phases:
     commands:
       - echo "Post-build phase started on `date`"
       - echo "Uploading JAR to S3..."
-      - |
-        aws s3 cp target/${APP_NAME}.jar s3://${STREAMING_APP_BUCKET}/${APP_NAME}.jar --region ${AWS_REGION}
+      - aws s3 cp target/${APP_NAME}.jar s3://${STREAMING_APP_BUCKET}/${APP_NAME}.jar --region ${AWS_REGION}
       - echo "Getting S3 object version..."
       - |
         S3_VERSION=$(aws s3api head-object \

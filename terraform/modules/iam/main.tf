@@ -28,10 +28,6 @@ variable "log_group_name" {
   type = string
 }
 
-variable "codebuild_bucket" {
-  type = string
-}
-
 # IAM Role for Flink Application
 resource "aws_iam_role" "flink" {
   name = "${var.app_name}-flink-role"
@@ -318,7 +314,19 @@ resource "aws_iam_policy" "codebuild" {
           "s3:GetObjectVersion"
         ]
         Resource = [
-          "arn:aws:s3:::${var.codebuild_bucket}/*"
+          "arn:aws:s3:::${var.app_name}-cicd-artifacts-${var.account_id}/*"
+        ]
+      },
+      {
+        Sid    = "S3ArtifactsBucketList"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:GetBucketVersioning"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.app_name}-cicd-artifacts-${var.account_id}"
         ]
       },
       {
@@ -398,8 +406,8 @@ resource "aws_iam_policy" "codepipeline" {
           "s3:ListBucket"
         ]
         Resource = [
-          "arn:aws:s3:::${var.codebuild_bucket}",
-          "arn:aws:s3:::${var.codebuild_bucket}/*"
+          "arn:aws:s3:::${var.app_name}-cicd-artifacts-${var.account_id}",
+          "arn:aws:s3:::${var.app_name}-cicd-artifacts-${var.account_id}/*"
         ]
       },
       {

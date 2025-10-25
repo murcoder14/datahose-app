@@ -65,7 +65,6 @@ module "iam" {
   input_data_bucket    = module.s3_buckets.input_data_bucket_name
   output_data_bucket   = module.s3_buckets.output_data_bucket_name
   log_group_name       = local.log_group_name
-  codebuild_bucket     = module.cicd.artifacts_bucket_name
 }
 
 # Module: CloudWatch Logs
