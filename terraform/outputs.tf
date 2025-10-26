@@ -73,8 +73,11 @@ output "deployment_commands" {
     # Trigger pipeline manually
     aws codepipeline start-pipeline-execution --name ${module.cicd.pipeline_name} --region ${var.aws_region}
     
-    # Send test data to Kinesis stream
-    aws kinesis put-record --stream-name ${module.kinesis.stream_name} --partition-key test --data '{"name":"Alice","visits":5}' --region ${var.aws_region}
+    # Send test data to Kinesis stream (base64 encoded)
+    echo '{"name":"Alice","visits":5}' | base64 | xargs -I {} aws kinesis put-record --stream-name ${module.kinesis.stream_name} --partition-key test --data {} --region ${var.aws_region}
+    
+    # Or use CLI binary format option (easier)
+    aws kinesis put-record --stream-name ${module.kinesis.stream_name} --partition-key test --data '{"name":"Alice","visits":5}' --cli-binary-format raw-in-base64-out --region ${var.aws_region}
     
     # View output data in S3
     aws s3 ls s3://${module.s3_buckets.output_data_bucket_name}/${var.output_table_name}/ --recursive --region ${var.aws_region}
