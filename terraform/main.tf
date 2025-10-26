@@ -1,6 +1,6 @@
 terraform {
   required_version = ">= 1.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -31,10 +31,10 @@ resource "random_id" "bucket_suffix" {
 }
 
 locals {
-  bucket_suffix         = var.bucket_suffix != "" ? var.bucket_suffix : "${formatdate("YYYYMMDD", timestamp())}-${random_id.bucket_suffix[0].hex}"
-  streaming_app_bucket  = "tm-streaming-app-bucket-${local.bucket_suffix}"
-  output_data_bucket    = "tm-output-data-bucket-${local.bucket_suffix}"
-  log_group_name        = "/aws/kinesis-analytics/${var.app_name}"
+  bucket_suffix        = var.bucket_suffix != "" ? var.bucket_suffix : "${formatdate("YYYYMMDD", timestamp())}-${random_id.bucket_suffix[0].hex}"
+  streaming_app_bucket = "tm-streaming-app-bucket-${local.bucket_suffix}"
+  output_data_bucket   = "tm-output-data-bucket-${local.bucket_suffix}"
+  log_group_name       = "/aws/kinesis-analytics/${var.app_name}"
 }
 
 # Data source for current AWS account and caller identity
@@ -45,20 +45,20 @@ data "aws_region" "current" {}
 module "s3_buckets" {
   source = "./modules/s3"
 
-  app_name              = var.app_name
-  streaming_app_bucket  = local.streaming_app_bucket
-  output_data_bucket    = local.output_data_bucket
-  output_table_name     = var.output_table_name
+  app_name             = var.app_name
+  streaming_app_bucket = local.streaming_app_bucket
+  output_data_bucket   = local.output_data_bucket
+  output_table_name    = var.output_table_name
 }
 
 # Module: Kinesis Data Stream
 module "kinesis" {
   source = "./modules/kinesis"
 
-  app_name          = var.app_name
-  stream_name       = "${var.app_name}-input-stream"
-  shard_count       = var.kinesis_shard_count
-  retention_period  = var.kinesis_retention_period
+  app_name         = var.app_name
+  stream_name      = "${var.app_name}-input-stream"
+  shard_count      = var.kinesis_shard_count
+  retention_period = var.kinesis_retention_period
 }
 
 # Module: IAM Roles and Policies
@@ -74,59 +74,39 @@ module "iam" {
   log_group_name       = local.log_group_name
 }
 
-# Module: CloudWatch Logs
-module "cloudwatch" {
-  source = "./modules/cloudwatch"
-
-  app_name          = var.app_name
-  log_group_name    = local.log_group_name
-  retention_in_days = var.cloudwatch_log_retention_days
-}
-
-# Module: Lambda for Flink Lifecycle Management
+# Module: Lambda for Flink Lifecycle Management (includes CloudWatch log groups)
 module "lambda" {
   source = "./modules/lambda"
 
-  app_name               = var.app_name
-  region                 = data.aws_region.current.name
-  account_id             = data.aws_caller_identity.current.account_id
-  lambda_role_arn        = module.iam.lambda_role_arn
-  flink_role_arn         = module.iam.flink_role_arn
-  streaming_app_bucket   = module.s3_buckets.streaming_app_bucket_name
-  kinesis_stream_name    = module.kinesis.stream_name
-  kinesis_stream_arn     = module.kinesis.stream_arn
-  output_data_bucket     = module.s3_buckets.output_data_bucket_name
-  output_table_name      = var.output_table_name
-  log_group_name         = local.log_group_name
-  flink_version          = var.flink_version
-  flink_parallelism      = var.flink_parallelism
-}
-
-# Module: Flink Application Lifecycle Management
-# This ensures the Flink app is properly deleted during terraform destroy
-module "flink_lifecycle" {
-  source = "./modules/flink"
-
-  app_name             = var.app_name
-  region               = data.aws_region.current.name
-  lambda_function_name = module.lambda.function_name
-
-  depends_on = [module.lambda]
+  app_name                      = var.app_name
+  region                        = data.aws_region.current.name
+  account_id                    = data.aws_caller_identity.current.account_id
+  lambda_role_arn               = module.iam.lambda_role_arn
+  flink_role_arn                = module.iam.flink_role_arn
+  streaming_app_bucket          = module.s3_buckets.streaming_app_bucket_name
+  kinesis_stream_name           = module.kinesis.stream_name
+  kinesis_stream_arn            = module.kinesis.stream_arn
+  output_data_bucket            = module.s3_buckets.output_data_bucket_name
+  output_table_name             = var.output_table_name
+  log_group_name                = local.log_group_name
+  flink_version                 = var.flink_version
+  flink_parallelism             = var.flink_parallelism
+  cloudwatch_log_retention_days = var.cloudwatch_log_retention_days
 }
 
 # Module: CI/CD Pipeline (CodePipeline + CodeBuild)
 module "cicd" {
   source = "./modules/cicd"
 
-  app_name                 = var.app_name
-  region                   = data.aws_region.current.name
-  account_id               = data.aws_caller_identity.current.account_id
-  streaming_app_bucket     = module.s3_buckets.streaming_app_bucket_name
-  codebuild_role_arn       = module.iam.codebuild_role_arn
-  codepipeline_role_arn    = module.iam.codepipeline_role_arn
-  lambda_function_name     = module.lambda.function_name
-  github_repo_owner        = var.github_repo_owner
-  github_repo_name         = var.github_repo_name
-  github_branch            = var.github_branch
-  github_token_secret_arn  = var.github_token_secret_arn
+  app_name                = var.app_name
+  region                  = data.aws_region.current.name
+  account_id              = data.aws_caller_identity.current.account_id
+  streaming_app_bucket    = module.s3_buckets.streaming_app_bucket_name
+  codebuild_role_arn      = module.iam.codebuild_role_arn
+  codepipeline_role_arn   = module.iam.codepipeline_role_arn
+  lambda_function_name    = module.lambda.function_name
+  github_repo_owner       = var.github_repo_owner
+  github_repo_name        = var.github_repo_name
+  github_branch           = var.github_branch
+  github_token_secret_arn = var.github_token_secret_arn
 }

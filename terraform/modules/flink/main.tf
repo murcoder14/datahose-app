@@ -18,8 +18,8 @@ resource "null_resource" "flink_app_lifecycle" {
   # Trigger recreation when Lambda function changes (indicating new deployment)
   triggers = {
     lambda_function_name = var.lambda_function_name
-    app_name            = var.app_name
-    region              = var.region
+    app_name             = var.app_name
+    region               = var.region
   }
 
   # On destroy, invoke Lambda to delete the Flink application
@@ -86,8 +86,8 @@ resource "null_resource" "flink_app_lifecycle" {
         echo "Application ${self.triggers.app_name} does not exist. Skipping deletion."
       fi
     EOT
-    
-    on_failure = continue  # Continue even if deletion fails (app might already be gone)
+
+    on_failure = continue # Continue even if deletion fails (app might already be gone)
   }
 }
 

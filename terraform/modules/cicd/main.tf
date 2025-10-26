@@ -47,7 +47,7 @@ variable "github_token_secret_arn" {
 # S3 Bucket for CI/CD Artifacts
 resource "aws_s3_bucket" "artifacts" {
   bucket        = "${var.app_name}-cicd-artifacts-${var.account_id}"
-  force_destroy = true  # Automatically empty bucket before deletion
+  force_destroy = true # Automatically empty bucket before deletion
 
   tags = {
     Name        = "CI/CD Artifacts Bucket"

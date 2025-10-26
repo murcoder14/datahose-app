@@ -20,7 +20,7 @@ variable "output_table_name" {
 # S3 Bucket for Flink Application JAR
 resource "aws_s3_bucket" "streaming_app" {
   bucket        = var.streaming_app_bucket
-  force_destroy = true  # Automatically empty bucket before deletion
+  force_destroy = true # Automatically empty bucket before deletion
 
   tags = {
     Name        = "Flink Application JAR Bucket"
@@ -48,7 +48,7 @@ resource "aws_s3_bucket_public_access_block" "streaming_app" {
 # S3 Bucket for Output Data
 resource "aws_s3_bucket" "output_data" {
   bucket        = var.output_data_bucket
-  force_destroy = true  # Automatically empty bucket before deletion
+  force_destroy = true # Automatically empty bucket before deletion
 
   tags = {
     Name        = "Output Data Bucket"
@@ -75,8 +75,8 @@ resource "aws_s3_bucket_public_access_block" "output_data" {
 
 # Create output table folder structure
 resource "aws_s3_object" "output_table_folder" {
-  bucket = aws_s3_bucket.output_data.id
-  key    = "${var.output_table_name}/"
+  bucket       = aws_s3_bucket.output_data.id
+  key          = "${var.output_table_name}/"
   content_type = "application/x-directory"
 }
 

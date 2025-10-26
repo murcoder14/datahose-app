@@ -51,7 +51,7 @@ resource "aws_kinesis_stream" "input_stream" {
 
   # Prevent accidental deletion of the stream with data
   lifecycle {
-    prevent_destroy = false  # Set to true to prevent accidental deletion
+    prevent_destroy = false # Set to true to prevent accidental deletion
   }
 }
 

@@ -26,6 +26,10 @@ from typing import Dict, Any, Optional
 import boto3
 from botocore.exceptions import ClientError
 
+# Import modular components
+from config_builder import FlinkConfigBuilder
+from status_manager import FlinkStatusManager
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -48,6 +52,19 @@ FLINK_VERSION = os.environ['FLINK_VERSION']
 FLINK_PARALLELISM = int(os.environ['FLINK_PARALLELISM'])
 
 JAR_KEY = f"{APP_NAME}.jar"
+
+# Initialize configuration builder and status manager
+config_builder = FlinkConfigBuilder({
+    'app_name': APP_NAME,
+    'streaming_bucket': STREAMING_APP_BUCKET,
+    'kinesis_arn': KINESIS_STREAM_ARN,
+    'region': REGION,
+    'output_bucket': OUTPUT_DATA_BUCKET,
+    'output_table': OUTPUT_TABLE_NAME,
+    'parallelism': FLINK_PARALLELISM
+})
+
+status_manager = FlinkStatusManager(kda_client, APP_NAME)
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
@@ -151,7 +168,7 @@ def deploy_application() -> Dict[str, Any]:
     logger.info(f"JAR version: {jar_version}")
     
     # Check if application exists
-    app_exists = _application_exists()
+    app_exists = status_manager.application_exists()
     
     if app_exists:
         # Check if update is needed by comparing JAR versions
@@ -160,7 +177,7 @@ def deploy_application() -> Dict[str, Any]:
         
         if current_jar_version == jar_version:
             logger.info("JAR version unchanged. Skipping update to avoid unnecessary restart.")
-            current_status = _get_application_status()
+            current_status = status_manager.get_status()
             
             if current_status == 'RUNNING':
                 logger.info("Application is already running with correct version.")
@@ -215,18 +232,6 @@ def _get_current_jar_version() -> str:
         raise
 
 
-def _application_exists() -> bool:
-    """Check if the Flink application exists."""
-    try:
-        kda_client.describe_application(ApplicationName=APP_NAME)
-        return True
-    except kda_client.exceptions.ResourceNotFoundException:
-        return False
-    except ClientError as e:
-        logger.error(f"Error checking application existence: {e}")
-        raise
-
-
 def _create_application(jar_version: str) -> Dict[str, Any]:
     """Create a new Flink application."""
     logger.info("Creating Flink application...")
@@ -234,64 +239,22 @@ def _create_application(jar_version: str) -> Dict[str, Any]:
     account_id = boto3.client('sts').get_caller_identity()['Account']
     
     try:
+        # Use config_builder to generate configuration
+        application_config = config_builder.build_application_config(jar_version)
+        
         response = kda_client.create_application(
             ApplicationName=APP_NAME,
             RuntimeEnvironment=FLINK_VERSION,
             ServiceExecutionRole=FLINK_ROLE_ARN,
-            ApplicationConfiguration={
-                'ApplicationCodeConfiguration': {
-                    'CodeContent': {
-                        'S3ContentLocation': {
-                            'BucketARN': f'arn:aws:s3:::{STREAMING_APP_BUCKET}',
-                            'FileKey': JAR_KEY,
-                            'ObjectVersion': jar_version
-                        }
-                    },
-                    'CodeContentType': 'ZIPFILE'
-                },
-                'FlinkApplicationConfiguration': {
-                    'CheckpointConfiguration': {
-                        'ConfigurationType': 'DEFAULT'
-                    },
-                    'MonitoringConfiguration': {
-                        'ConfigurationType': 'CUSTOM',
-                        'MetricsLevel': 'APPLICATION',
-                        'LogLevel': 'INFO'
-                    },
-                    'ParallelismConfiguration': {
-                        'ConfigurationType': 'CUSTOM',
-                        'Parallelism': FLINK_PARALLELISM,
-                        'ParallelismPerKPU': 1,
-                        'AutoScalingEnabled': False
-                    }
-                },
-                'EnvironmentProperties': {
-                    'PropertyGroups': [
-                        {
-                            'PropertyGroupId': 'KinesisSource',
-                            'PropertyMap': {
-                                'stream.arn': KINESIS_STREAM_ARN,
-                                'aws.region': REGION
-                            }
-                        },
-                        {
-                            'PropertyGroupId': 'S3Sink',
-                            'PropertyMap': {
-                                'bucket': OUTPUT_DATA_BUCKET,
-                                'table': OUTPUT_TABLE_NAME
-                            }
-                        }
-                    ]
-                }
-            }
+            ApplicationConfiguration=application_config
         )
         
         logger.info("Application created. Waiting for READY status...")
-        _wait_for_status(APP_NAME, 'READY', max_wait=300)
+        status_manager.wait_for_status('READY', max_wait=300)
         
         # Add CloudWatch logging
         logger.info("Adding CloudWatch logging configuration...")
-        app_version = _get_application_version()
+        app_version = status_manager.get_version()
         
         kda_client.add_application_cloud_watch_logging_option(
             ApplicationName=APP_NAME,
@@ -318,71 +281,24 @@ def _update_application(jar_version: str) -> Dict[str, Any]:
     logger.info("Updating Flink application...")
     
     # Ensure application is in READY state before updating
-    current_status = _get_application_status()
-    logger.info(f"Current application status: {current_status}")
-    
-    if current_status == 'RUNNING':
-        logger.info("Stopping application before update...")
-        stop_application()
-        _wait_for_status(APP_NAME, 'READY', max_wait=300)
-    elif current_status == 'STOPPING':
-        logger.info("Application is already stopping. Waiting for READY status...")
-        _wait_for_status(APP_NAME, 'READY', max_wait=300)
-    elif current_status != 'READY':
-        raise Exception(f"Cannot update application in {current_status} state. Expected READY or RUNNING.")
+    try:
+        status_manager.ensure_ready(stop_if_running=True, max_wait=300)
+    except Exception as e:
+        logger.error(f"Failed to ensure READY state: {e}")
+        raise
     
     try:
-        app_version = _get_application_version()
+        app_version = status_manager.get_version()
+        
+        # Use config_builder to generate update configuration
+        application_config_update = config_builder.build_application_config_update(jar_version)
+        # Use config_builder to generate update configuration
+        application_config_update = config_builder.build_application_config_update(jar_version)
         
         response = kda_client.update_application(
             ApplicationName=APP_NAME,
             CurrentApplicationVersionId=app_version,
-            ApplicationConfigurationUpdate={
-                'ApplicationCodeConfigurationUpdate': {
-                    'CodeContentTypeUpdate': 'ZIPFILE',
-                    'CodeContentUpdate': {
-                        'S3ContentLocationUpdate': {
-                            'BucketARNUpdate': f'arn:aws:s3:::{STREAMING_APP_BUCKET}',
-                            'FileKeyUpdate': JAR_KEY,
-                            'ObjectVersionUpdate': jar_version
-                        }
-                    }
-                },
-                'FlinkApplicationConfigurationUpdate': {
-                    'CheckpointConfigurationUpdate': {
-                        'ConfigurationTypeUpdate': 'DEFAULT'
-                    },
-                    'MonitoringConfigurationUpdate': {
-                        'ConfigurationTypeUpdate': 'CUSTOM',
-                        'LogLevelUpdate': 'INFO',
-                        'MetricsLevelUpdate': 'APPLICATION'
-                    },
-                    'ParallelismConfigurationUpdate': {
-                        'ConfigurationTypeUpdate': 'CUSTOM',
-                        'ParallelismUpdate': FLINK_PARALLELISM,
-                        'ParallelismPerKPUUpdate': 1,
-                        'AutoScalingEnabledUpdate': False
-                    }
-                },
-                'EnvironmentPropertyUpdates': {
-                    'PropertyGroups': [
-                        {
-                            'PropertyGroupId': 'KinesisSource',
-                            'PropertyMap': {
-                                'stream.arn': KINESIS_STREAM_ARN,
-                                'aws.region': REGION
-                            }
-                        },
-                        {
-                            'PropertyGroupId': 'S3Sink',
-                            'PropertyMap': {
-                                'bucket': OUTPUT_DATA_BUCKET,
-                                'table': OUTPUT_TABLE_NAME
-                            }
-                        }
-                    ]
-                }
-            }
+            ApplicationConfigurationUpdate=application_config_update
         )
         
         logger.info("Application updated successfully")
@@ -401,7 +317,7 @@ def start_application() -> Dict[str, Any]:
     """Start the Flink application."""
     logger.info(f"Starting application: {APP_NAME}")
     
-    current_status = _get_application_status()
+    current_status = status_manager.get_status()
     
     if current_status == 'RUNNING':
         logger.info("Application is already running")
@@ -434,7 +350,7 @@ def stop_application() -> Dict[str, Any]:
     """Stop the Flink application."""
     logger.info(f"Stopping application: {APP_NAME}")
     
-    current_status = _get_application_status()
+    current_status = status_manager.get_status()
     
     if current_status in ['READY', 'STOPPING']:
         logger.info(f"Application is already stopped or stopping: {current_status}")
@@ -444,7 +360,7 @@ def stop_application() -> Dict[str, Any]:
         kda_client.stop_application(ApplicationName=APP_NAME)
         
         logger.info("Stop command issued. Waiting for READY status...")
-        _wait_for_status(APP_NAME, 'READY', max_wait=300)
+        status_manager.wait_for_status('READY', max_wait=300)
         
         logger.info("Application stopped successfully")
         return {'action': 'stop', 'status': 'success'}
@@ -459,7 +375,7 @@ def delete_application() -> Dict[str, Any]:
     logger.info(f"Deleting application: {APP_NAME}")
     
     # Stop the application if running
-    current_status = _get_application_status()
+    current_status = status_manager.get_status()
     if current_status == 'RUNNING':
         logger.info("Stopping application before deletion...")
         stop_application()
@@ -505,60 +421,3 @@ def describe_application() -> Dict[str, Any]:
     except ClientError as e:
         logger.error(f"Failed to describe application: {e}")
         raise
-
-
-def _get_application_status() -> str:
-    """Get current application status."""
-    try:
-        response = kda_client.describe_application(ApplicationName=APP_NAME)
-        return response['ApplicationDetail']['ApplicationStatus']
-    except ClientError as e:
-        logger.error(f"Failed to get application status: {e}")
-        raise
-
-
-def _get_application_version() -> int:
-    """Get current application version."""
-    try:
-        response = kda_client.describe_application(ApplicationName=APP_NAME)
-        return response['ApplicationDetail']['ApplicationVersionId']
-    except ClientError as e:
-        logger.error(f"Failed to get application version: {e}")
-        raise
-
-
-def _wait_for_status(app_name: str, target_status: str, max_wait: int = 300) -> None:
-    """
-    Wait for application to reach target status.
-    
-    Args:
-        app_name: Application name
-        target_status: Desired status (e.g., 'RUNNING', 'READY')
-        max_wait: Maximum wait time in seconds
-    """
-    start_time = time.time()
-    poll_interval = 10
-    
-    # Valid transitional states that can lead to target status
-    valid_transitions = {
-        'READY': ['STOPPING', 'UPDATING'],
-        'RUNNING': ['STARTING', 'UPDATING']
-    }
-    
-    while (time.time() - start_time) < max_wait:
-        status = _get_application_status()
-        logger.info(f"Current status: {status}, target: {target_status}, elapsed: {int(time.time() - start_time)}s")
-        
-        if status == target_status:
-            logger.info(f"Application reached {target_status} status")
-            return
-        
-        # Check if current status is a valid transition to target
-        if target_status in valid_transitions:
-            if status not in valid_transitions[target_status] and status != target_status:
-                # If not in valid transition states, it might be stuck
-                logger.warning(f"Application in unexpected state {status} while waiting for {target_status}")
-        
-        time.sleep(poll_interval)
-    
-    raise TimeoutError(f"Timeout waiting for application to reach {target_status} status after {max_wait}s")

@@ -45,7 +45,7 @@ output "codebuild_project_name" {
 
 output "log_group_name" {
   description = "CloudWatch log group for Flink application"
-  value       = module.cloudwatch.log_group_name
+  value       = module.lambda.flink_log_group_name
 }
 
 output "artifacts_bucket" {
@@ -60,12 +60,12 @@ output "bucket_suffix" {
 
 output "deployment_commands" {
   description = "Useful commands for deployment and monitoring"
-  value = <<-EOT
+  value       = <<-EOT
     # View Lambda logs
     aws logs tail /aws/lambda/${module.lambda.function_name} --follow --region ${var.aws_region}
     
     # View Flink application logs
-    aws logs tail ${module.cloudwatch.log_group_name} --follow --region ${var.aws_region}
+    aws logs tail ${module.lambda.flink_log_group_name} --follow --region ${var.aws_region}
     
     # Describe Flink application
     aws kinesisanalyticsv2 describe-application --application-name ${var.app_name} --region ${var.aws_region}
