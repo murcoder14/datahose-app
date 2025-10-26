@@ -1,415 +1,140 @@
-# DataHose App - Enterprise Flink Streaming Platform
+# DataHose App - Flink Streaming Platform
 
 [![Terraform](https://img.shields.io/badge/Terraform-1.0+-623CE4?logo=terraform)](https://www.terraform.io/)
 [![AWS](https://img.shields.io/badge/AWS-Managed_Flink-FF9900?logo=amazon-aws)](https://aws.amazon.com/managed-service-apache-flink/)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python)](https://www.python.org/)
 [![Java](https://img.shields.io/badge/Java-11-007396?logo=java)](https://www.java.com/)
 
-Real-time streaming analytics platform built with Apache Flink on AWS, featuring enterprise-grade infrastructure as code (Terraform) and fully automated CI/CD pipelines.
+A real-time streaming analytics platform built with Apache Flink on AWS, featuring enterprise-grade infrastructure as code (Terraform) and a fully automated CI/CD pipeline.
 
 ## 🚀 Overview
 
-This project provides a **production-ready streaming analytics platform** that processes CSV data in real-time using Apache Flink on AWS.
+This project provides a production-ready streaming application that processes data in real-time. The Flink application reads text data from an **AWS Kinesis Data Stream**, converts the text to **uppercase**, and writes the results to an **S3 bucket**.
 
 ### ✨ Key Features
 
-- **Infrastructure as Code**: Modular Terraform for S3, IAM, CloudWatch, Lambda, CodePipeline
-- **Automated CI/CD**: GitHub → CodeBuild → Lambda → Flink (fully automated)
-- **Lifecycle Management**: Python 3.13 Lambda function manages Flink operations
-- **Developer Tooling**: Makefile with 20+ commands for deployment, monitoring, testing
-- **Production Ready**: Least-privilege IAM, CloudWatch logging, error handling, retries
+- **Infrastructure as Code**: Modular Terraform for all AWS resources.
+- **Automated CI/CD**: A CodePipeline workflow automates builds and deployments on every `git push`.
+- **Serverless Lifecycle Management**: A Python Lambda function manages the Flink application's lifecycle (deploy, start, stop).
+- **Developer Tooling**: A `Makefile` provides simple commands for deployment, monitoring, and testing.
 
 ### 📊 Architecture
 
+**Data Flow:**
 ```
-GitHub Push → CodePipeline → CodeBuild (Maven) → S3 (JAR) 
-                                ↓
-                            Lambda (Lifecycle)
-                                ↓
-                        Managed Flink App
-                        ↓               ↓
-                S3 Input (CSV)    S3 Output (Results)
+[Kinesis Data Stream]──> [AWS Flink Application] ──> [S3 Output Bucket]
 ```
 
-**Detailed Architecture:**
+**CI/CD and Deployment Flow:**
 ```
-┌─────────────┐
-│   GitHub    │ (webhook on push)
-└──────┬──────┘
-       ↓
-┌──────────────────────────────────────┐
-│      AWS CodePipeline                │
-│  ┌─────────┐  ┌──────────┐  ┌──────┐│
-│  │ Source  │→ │  Build   │→ │Deploy││
-│  │(GitHub) │  │(CodeBuild)│ │(Lambda)│
-│  └─────────┘  └────┬─────┘  └───┬──┘│
-└──────────────────┼──────────────┼────┘
-                   ↓              ↓
-           ┌───────────┐   ┌──────────────┐
-           │ S3 JAR    │   │ Lambda       │
-           │ Bucket    │   │ Lifecycle    │
-           └───────────┘   └──────┬───────┘
-                                  ↓
-                      ┌────────────────────┐
-                      │ Managed Flink App  │
-                      │ (Apache Flink 1.20)│
-                      └─────┬────────┬─────┘
-                            ↓        ↓
-                    ┌───────────┐  ┌────────────┐
-                    │S3 Input   │  │S3 Output   │
-                    │(datafall/)│  │(datalake/) │
-                    └───────────┘  └────────────┘
+[GitHub Push] ──> [CodePipeline] ──> [CodeBuild] ──> [S3 (JAR)]
+                                                         │
+                                                         ▼
+                                     [Lambda] ──> [Deploy to Flink]
 ```
 
-**IAM Roles:**
-- **Flink Role**: Read JAR, read input data, write output data, CloudWatch logs
-- **Lambda Role**: Manage Flink lifecycle (KDA API), PassRole, read JAR metadata
-- **CodeBuild Role**: Upload JAR to S3, CloudWatch logs
-- **CodePipeline Role**: GitHub access, trigger CodeBuild, invoke Lambda
+## 🚀 Deployment Guide
 
-## 🎯 Quick Start
+Follow these steps to deploy the entire infrastructure and application.
 
-### Prerequisites
-```bash
-# Install Terraform
-brew install terraform  # macOS
-# Or download from https://www.terraform.io/downloads
+### 1. Prerequisites
 
-# Install AWS CLI
-brew install awscli
-aws configure  # Set credentials and region (us-east-2)
-```
+- **Install Tools**: Ensure you have [Terraform](https://www.terraform.io/downloads) (>= 1.0) and the [AWS CLI](https://aws.amazon.com/cli/) installed.
+- **Configure AWS Credentials**: Run `aws configure` to set up your access key, secret key, and default region (e.g., `us-east-2`).
+- **Set up GitHub Connection**:
+    1.  In the AWS Console, navigate to **Developer Tools > CodePipeline > Settings > Connections**.
+    2.  Click **Create connection**, select **GitHub**, and complete the authorization flow.
+    3.  Copy the **Connection ARN** for the new connection.
 
-### Deploy in 3 Steps
+### 2. Configure the Project
 
-**1. Configure GitHub Integration**
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/murcoder14/datahose-app.git
+    cd datahose-app
+    ```
+2.  Create a `terraform.tfvars` file from the example:
+    ```bash
+    cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+    ```
+3.  Edit `terraform/terraform.tfvars` and provide the required values, especially your `github_token_secret_arn` (the Connection ARN from the previous step).
 
-Create a CodeStar Connection:
-```bash
-# AWS Console → Developer Tools → Settings → Connections
-# Create connection → GitHub → Authorize
-# Copy the Connection ARN
-```
+### 3. Deploy the Infrastructure
 
-**2. Configure and Deploy**
+Run the following command to initialize Terraform, plan the changes, and apply them:
 
 ```bash
-# Clone repository
-git clone https://github.com/murcoder14/datahose-app.git
-cd datahose-app
-
-# Run interactive setup
-./setup.sh
-
-# Or manually:
-cd terraform/
-cp terraform.tfvars.example terraform.tfvars
-vim terraform.tfvars  # Add GitHub connection ARN
-
-# Deploy
 make deploy
 ```
+When prompted, type `yes` to approve the deployment. This will create all the necessary AWS resources (IAM roles, S3 buckets, Kinesis stream, Lambda, and CodePipeline).
 
-> **🔒 Security Note:** The `terraform.tfvars` file contains sensitive information (GitHub token ARN) and is already in `.gitignore`. **Never commit this file** to version control!
+### 4. Run the CI/CD Pipeline
 
-**3. Test the Pipeline**
+The infrastructure is now ready, but the Flink application itself has not been deployed yet. Trigger the pipeline to build the JAR and deploy it.
 
 ```bash
-# Trigger pipeline
 make pipeline-start
-
-# Monitor
-make logs-flink
-
-# Upload test data
-make test-upload
-
-# Check output
-make test-check-output
 ```
+This command manually starts the pipeline. Alternatively, any `git push` to the configured branch will also trigger it. You can monitor the progress in the AWS CodePipeline console or by using `make pipeline-status`.
 
-## 📁 Project Structure
+### 5. Test the Application
 
-```
-datahose-app/
-├── terraform/                    # Infrastructure as Code
-│   ├── main.tf                  # Root module orchestration
-│   ├── variables.tf             # Input variables
-│   ├── outputs.tf               # Output values
-│   ├── terraform.tfvars.example # Configuration template
-│   └── modules/
-│       ├── s3/                  # S3 buckets (app, input, output)
-│       ├── iam/                 # IAM roles & policies
-│       ├── cloudwatch/          # Log groups
-│       ├── lambda/              # Flink lifecycle function
-│       └── cicd/                # CodePipeline + CodeBuild
-│
-├── lambda/
-│   └── flink_lifecycle.py       # Python 3.13 Lambda function
-│
-├── src/main/java/               # Flink application (Java 11)
-│   └── org/muralis/datahose/
-│       └── StreamingApp.java    # Main Flink job
-│
-├── buildspec.yml                # CodeBuild specification
-├── Makefile                     # Developer commands
-├── DEPLOYMENT.md                # Deployment guide (300+ lines)
-├── ARCHITECTURE.md              # Architecture details
-└── TERRAFORM_README.md          # Terraform implementation notes
-```
+Once the pipeline has successfully completed the "Deploy" stage, the Flink application will be running.
+
+1.  **Send test data** to the Kinesis stream:
+    ```bash
+    make test-upload
+    ```
+2.  **Check the output** in the S3 bucket:
+    ```bash
+    make test-check-output
+    ```
+You should see the uppercase version of your test data in the output files.
 
 ## 🛠️ Make Commands
+
+A `Makefile` provides shortcuts for common operations.
 
 ```bash
 # Deployment
 make deploy              # Full deployment (init + plan + apply)
-make init                # Initialize Terraform
-make plan                # Show execution plan
-make apply               # Apply changes
 make destroy             # Destroy all resources
 
-# Pipeline
+# Pipeline & Flink
 make pipeline-start      # Trigger pipeline manually
-make pipeline-status     # Show pipeline status
-
-# Flink Management
 make flink-status        # Show Flink app status
-make flink-start         # Start Flink application
 make flink-stop          # Stop Flink application
 
-# Monitoring
+# Monitoring & Testing
 make logs-flink          # Tail Flink logs
-make logs-lambda         # Tail Lambda logs
-make logs-codebuild      # Tail CodeBuild logs
+make test-upload         # Upload sample data to Kinesis
+make test-check-output   # List output files in S3
 
-# Testing
-make test-upload         # Upload sample CSV
-make test-check-output   # List output files
-make test-download-output # Download and view results
-
-# Utilities
-make list-buckets        # List S3 buckets
-make outputs             # Show Terraform outputs
-make costs               # Estimate monthly costs
-make help                # Show all commands
+# Show all commands
+make help
 ```
 
-## 📖 Additional Documentation
+## 🔐 Security
 
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed step-by-step deployment instructions.
+- **Secrets Management**: The `terraform.tfvars` file is ignored by Git. GitHub tokens are managed via AWS CodeStar Connections.
+- **Least-Privilege IAM**: Each service has a dedicated IAM role with minimal required permissions.
+- **S3 Security**: All S3 buckets have public access blocked, versioning enabled, and at-rest encryption enabled.
 
-## 🔧 How It Works
-
-### CI/CD Flow
-
-1. **Source Stage**: GitHub webhook triggers CodePipeline on push
-2. **Build Stage**: CodeBuild compiles Maven project (Java 11)
-   - Runs `mvn clean package`
-   - Uploads JAR to S3 with versioning
-3. **Deploy Stage**: Lambda function invoked with artifact metadata
-   - Checks if Flink app exists
-   - Creates new or updates existing app
-   - Configures environment properties
-   - Starts the application
-
-### Flink Application
-
-- **Input**: Reads CSV files from `s3://input-bucket/datafall/`
-- **Processing**: Aggregates visit counts by name using Flink Table API
-- **Output**: Writes results to `s3://output-bucket/datalake/`
-
-Example:
-```csv
-# Input (visits.csv)
-name,visits
-Alice,5
-Bob,3
-Alice,2
-
-# Output (results)
-Alice visited the gym 7 times
-Bob visited the gym 3 times
-```
-
-### Lambda Lifecycle Management
-
-Python function handles complete Flink lifecycle:
-
-```python
-# Actions supported
-deploy    # Create or update + start
-start     # Start application
-stop      # Stop application
-delete    # Delete application
-describe  # Get application details
-```
-
-Includes:
-- Status polling with timeouts
-- Automatic retries
-- Error handling
-- CloudWatch logging
-- CodePipeline integration
-
-## � Security
-
-### Best Practices
-
-- **Secrets Management**: 
-  - `terraform.tfvars` is in `.gitignore` - **never commit it**
-  - GitHub tokens stored in AWS Secrets Manager or CodeStar Connections
-  - No hardcoded credentials in code
-  
-- **IAM Roles**: 
-  - Least-privilege policies for each service
-  - Separate roles: Flink, Lambda, CodeBuild, CodePipeline
-  - No wildcard (`*`) permissions in policies
-  
-- **S3 Security**:
-  - All buckets have public access blocked by default
-  - Versioning enabled for JAR and data buckets
-  - At-rest encryption enabled
-  
-- **Network**:
-  - Private subnets for Flink application (if VPC configured)
-  - CloudWatch logs for audit trail
-  
-### What's Protected in .gitignore
-
-```gitignore
-terraform/terraform.tfvars      # Contains GitHub token ARN
-terraform/*.tfstate             # Contains infrastructure state
-terraform/.terraform/           # Terraform plugins and cache
-.aws/                          # AWS credentials
-lambda/*.zip                   # Built Lambda packages
-```
-
-### Checking for Exposed Secrets
-
-```bash
-# Verify terraform.tfvars is ignored
-git check-ignore -v terraform/terraform.tfvars
-
-# Check what's staged before committing
-git status
-
-# Scan for accidentally committed secrets (optional)
-git secrets --scan
-```
-
-## �💰 Cost Estimation
+## 💰 Cost Estimation
 
 **Monthly costs (us-east-2, light usage):**
 - Flink (1 KPU, 24/7): ~$160.00
-- S3 storage (10 GB): ~$0.23
-- Lambda (100 invocations): ~$0.00
-- CodeBuild (10 builds): ~$0.10
-- CloudWatch Logs (1 GB): ~$0.50
-- CodePipeline (1 pipeline): ~$1.00
+- S3, Lambda, CodeBuild, CloudWatch, CodePipeline: ~$2.00
 - **Total: ~$162/month**
 
-**Cost optimization:**
-```bash
-# Stop Flink when not in use
-make flink-stop  # Saves ~$160/month
-```
-
-## 🔒 Security
-
-- **Least-privilege IAM**: Separate roles for Flink, Lambda, CodeBuild, CodePipeline
-- **S3 encryption**: At-rest encryption for all buckets
-- **Private buckets**: Public access blocked by default
-- **CloudWatch logging**: Audit trail for all operations
-- **Versioned buckets**: JAR and data versioning enabled
-
-## 🧪 Testing
-
-```bash
-# 1. Deploy infrastructure
-make deploy
-
-# 2. Trigger pipeline
-make pipeline-start
-
-# 3. Upload sample data
-make test-upload
-
-# 4. Monitor processing
-make logs-flink
-
-# 5. Verify output
-make test-check-output
-```
+To save costs, stop the Flink application when not in use: `make flink-stop`.
 
 ## 🚨 Troubleshooting
 
-### Pipeline fails at Build
-```bash
-make logs-codebuild
-# Common issues: Maven errors, Java version mismatch, S3 permissions
-```
-
-### Pipeline fails at Deploy
-```bash
-make logs-lambda
-# Common issues: Flink app stuck, IAM permissions, JAR not found
-```
-
-### Flink app fails to start
-```bash
-make logs-flink
-# Common issues: RuntimeExecutionMode (use STREAMING), S3 permissions
-```
-
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed troubleshooting.
-
-## 🔄 Modernization Journey
-
-This project has been **completely modernized** from shell script-based infrastructure to enterprise-grade Terraform + CI/CD:
-
-**Previous Approach (Shell Scripts - Removed):**
-- Manual deployment via `iac_create.sh` and `cicd.sh`
-- Imperative infrastructure with no state management
-- Manual monitoring and lifecycle management
-- Difficult team collaboration
-
-**Current Approach (Terraform + CI/CD):**
-- **Automated**: Git push triggers entire pipeline
-- **Declarative**: Terraform manages infrastructure state
-- **Scalable**: CodePipeline orchestrates build and deployment
-- **Observable**: Integrated CloudWatch logging
-- **Collaborative**: Terraform state enables team workflows
-- **Reliable**: Lambda-based lifecycle management with retries
-
-## 🤝 Contributing
-
-Contributions welcome! This is a reference implementation for:
-- Terraform best practices
-- AWS CI/CD automation
-- Flink application deployment
-- Lambda-based lifecycle management
+- **Pipeline fails at Build stage?** Check the CodeBuild logs: `make logs-codebuild`.
+- **Pipeline fails at Deploy stage?** Check the Lambda logs: `make logs-lambda`.
+- **Flink app fails to start or runs with errors?** Check the Flink application logs: `make logs-flink`.
 
 ## 📄 License
 
-MIT License - see LICENSE file for details
-
-## 🙏 Acknowledgments
-
-- Built for real-time streaming analytics at scale
-- Inspired by AWS best practices and 12-factor app methodology
-- Designed for enterprise production workloads
-
-## 📞 Support
-
-- **Issues**: File an issue on GitHub
-- **Logs**: Use `make logs-flink`, `make logs-lambda`, `make logs-codebuild`
-- **Status**: Use `make flink-status`, `make pipeline-status`
-- **Documentation**: See DEPLOYMENT.md, ARCHITECTURE.md
-
----
-
-**Quick Links:**
-- [Deployment Guide](./DEPLOYMENT.md) - Detailed step-by-step setup
-- [Quick Start](#-quick-start) - Get started in 3 steps
-- [Makefile Commands](#-make-commands) - All available commands
-- [Troubleshooting](#-troubleshooting) - Common issues and fixes
+MIT License. See the `LICENSE` file for details.
