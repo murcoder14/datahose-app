@@ -86,6 +86,7 @@ resource "aws_iam_policy" "flink" {
         Effect = "Allow"
         Action = [
           "kinesis:DescribeStream",
+          "kinesis:DescribeStreamSummary",
           "kinesis:GetShardIterator",
           "kinesis:GetRecords",
           "kinesis:ListShards"
