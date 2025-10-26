@@ -375,6 +375,10 @@ def start_application() -> Dict[str, Any]:
         logger.info("Application is already running")
         return {'action': 'start', 'status': 'already_running'}
     
+    if current_status == 'STARTING':
+        logger.info("Application is already starting")
+        return {'action': 'start', 'status': 'already_starting'}
+    
     try:
         kda_client.start_application(
             ApplicationName=APP_NAME,
@@ -385,11 +389,9 @@ def start_application() -> Dict[str, Any]:
             }
         )
         
-        logger.info("Start command issued. Waiting for RUNNING status...")
-        _wait_for_status(APP_NAME, 'RUNNING', max_wait=600)
-        
-        logger.info("Application started successfully")
-        return {'action': 'start', 'status': 'success'}
+        logger.info("Start command issued successfully. Application will start asynchronously.")
+        logger.info("Monitor application status with: aws kinesisanalyticsv2 describe-application --application-name datahose-app --region us-east-2")
+        return {'action': 'start', 'status': 'starting'}
         
     except ClientError as e:
         logger.error(f"Failed to start application: {e}")
