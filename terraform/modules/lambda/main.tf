@@ -55,6 +55,19 @@ data "archive_file" "lambda" {
   output_path = "${path.module}/lambda_package.zip"
 }
 
+# CloudWatch log group for Lambda (must be created BEFORE Lambda function)
+resource "aws_cloudwatch_log_group" "lambda" {
+  name              = "/aws/lambda/${var.app_name}-flink-lifecycle"
+  retention_in_days = 7
+  skip_destroy      = false  # Ensure log group is deleted on terraform destroy
+
+  tags = {
+    Name        = "Lambda Logs"
+    Application = var.app_name
+  }
+}
+
+# Lambda function
 resource "aws_lambda_function" "flink_lifecycle" {
   filename         = data.archive_file.lambda.output_path
   function_name    = "${var.app_name}-flink-lifecycle"
@@ -85,17 +98,8 @@ resource "aws_lambda_function" "flink_lifecycle" {
     Name        = "Flink Lifecycle Management"
     Application = var.app_name
   }
-}
 
-# CloudWatch log group for Lambda
-resource "aws_cloudwatch_log_group" "lambda" {
-  name              = "/aws/lambda/${aws_lambda_function.flink_lifecycle.function_name}"
-  retention_in_days = 7
-
-  tags = {
-    Name        = "Lambda Logs"
-    Application = var.app_name
-  }
+  depends_on = [aws_cloudwatch_log_group.lambda]
 }
 
 variable "lambda_role_arn" {
