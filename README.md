@@ -3,9 +3,9 @@
 [![Terraform](https://img.shields.io/badge/Terraform-1.0+-623CE4?logo=terraform)](https://www.terraform.io/)
 [![AWS](https://img.shields.io/badge/AWS-Managed_Flink-FF9900?logo=amazon-aws)](https://aws.amazon.com/managed-service-apache-flink/)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python)](https://www.python.org/)
-[![Java](https://img.shields.io/badge/Java-11-007396?logo=java)](https://www.java.com/)
+[![Java](https://img.shields.io/badge/Java-11-007396?logo=java)](https://docs.oracle.com/en/java/javase/11/)
 
-A real-time streaming analytics platform built with Apache Flink on AWS, featuring enterprise-grade infrastructure as code (Terraform) and a fully automated CI/CD pipeline.
+A real-time streaming analytics platform built with Apache Flink on AWS, featuring enterprise-grade infrastructure as code (Terraform) and a fully automated CI/CD pipeline that uses AWS CodePipeline and AWS CodeBuild.
 
 ## 🚀 Overview
 
@@ -14,8 +14,8 @@ This project provides a production-ready streaming application that processes da
 ### ✨ Key Features
 
 - **Infrastructure as Code**: Modular Terraform for all AWS resources.
-- **Automated CI/CD**: A CodePipeline workflow automates builds and deployments on every `git push`.
-- **Serverless Lifecycle Management**: A Python Lambda function manages the Flink application's lifecycle (deploy, start, stop).
+- **Automated CI/CD**: AWS CodePipeline workflow automates builds and deployments on every `git push`.
+- **Serverless Lifecycle Management**: A Python AWS Lambda function manages the Flink application's lifecycle (deploy, start, stop).
 - **Developer Tooling**: A `Makefile` provides simple commands for deployment, monitoring, and testing.
 
 ### 📊 Architecture
