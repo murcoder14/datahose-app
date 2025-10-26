@@ -25,12 +25,8 @@ phases:
       - mvn clean package -DskipTests
       - echo "Build completed. Checking JAR file..."
       - ls -lh target/
-      - |
-        if [ ! -f "target/${APP_NAME}.jar" ]; then
-          echo "ERROR: JAR file not found at target/${APP_NAME}.jar"
-          exit 1
-        fi
-      - echo "JAR file found. Size: $(du -h target/${APP_NAME}.jar | cut -f1)"
+      - test -f "target/${APP_NAME}.jar" || (echo "ERROR JAR file not found" && exit 1)
+      - echo "JAR file found. Size $(du -h target/${APP_NAME}.jar | cut -f1)"
 
   post_build:
     commands:
@@ -38,14 +34,8 @@ phases:
       - echo "Uploading JAR to S3..."
       - aws s3 cp target/${APP_NAME}.jar s3://${STREAMING_APP_BUCKET}/${APP_NAME}.jar --region ${AWS_REGION}
       - echo "Getting S3 object version..."
-      - |
-        S3_VERSION=$(aws s3api head-object \
-          --bucket ${STREAMING_APP_BUCKET} \
-          --key ${APP_NAME}.jar \
-          --region ${AWS_REGION} \
-          --query 'VersionId' \
-          --output text)
-        echo "S3 Object Version: $S3_VERSION"
+      - S3_VERSION=$(aws s3api head-object --bucket ${STREAMING_APP_BUCKET} --key ${APP_NAME}.jar --region ${AWS_REGION} --query VersionId --output text)
+      - echo "S3 Object Version ${S3_VERSION}"
       - echo "JAR uploaded successfully"
       - echo "Build completed on $(date)"
 
