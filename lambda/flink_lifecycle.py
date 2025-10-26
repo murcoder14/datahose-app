@@ -154,8 +154,26 @@ def deploy_application() -> Dict[str, Any]:
     app_exists = _application_exists()
     
     if app_exists:
-        logger.info("Application exists. Updating...")
-        result = _update_application(jar_version)
+        # Check if update is needed by comparing JAR versions
+        current_jar_version = _get_current_jar_version()
+        logger.info(f"Current JAR version in Flink app: {current_jar_version}")
+        
+        if current_jar_version == jar_version:
+            logger.info("JAR version unchanged. Skipping update to avoid unnecessary restart.")
+            current_status = _get_application_status()
+            
+            if current_status == 'RUNNING':
+                logger.info("Application is already running with correct version.")
+                return {'action': 'deploy', 'status': 'already_up_to_date', 'jar_version': jar_version}
+            elif current_status == 'READY':
+                logger.info("Application is stopped. Starting with existing version...")
+                return start_application()
+            else:
+                logger.info(f"Application is in {current_status} state.")
+                return {'action': 'deploy', 'status': f'app_status_{current_status.lower()}', 'jar_version': jar_version}
+        else:
+            logger.info(f"JAR version changed from {current_jar_version} to {jar_version}. Updating application...")
+            result = _update_application(jar_version)
     else:
         logger.info("Application does not exist. Creating...")
         result = _create_application(jar_version)
@@ -180,6 +198,20 @@ def _get_jar_version() -> str:
         return version_id
     except ClientError as e:
         logger.error(f"Failed to get JAR version: {e}")
+        raise
+
+
+def _get_current_jar_version() -> str:
+    """Get the JAR version currently deployed in the Flink application."""
+    try:
+        response = kda_client.describe_application(ApplicationName=APP_NAME)
+        app_config = response['ApplicationDetail']['ApplicationConfigurationDescription']
+        code_content = app_config.get('ApplicationCodeConfigurationDescription', {}).get('CodeContentDescription', {})
+        s3_content = code_content.get('S3ApplicationCodeLocationDescription', {})
+        current_version = s3_content.get('ObjectVersion', 'unknown')
+        return current_version
+    except ClientError as e:
+        logger.error(f"Failed to get current JAR version: {e}")
         raise
 
 
