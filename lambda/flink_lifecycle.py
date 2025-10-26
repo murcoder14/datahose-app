@@ -291,12 +291,19 @@ def _update_application(jar_version: str) -> Dict[str, Any]:
     """Update an existing Flink application."""
     logger.info("Updating Flink application...")
     
-    # Stop the application if running
+    # Ensure application is in READY state before updating
     current_status = _get_application_status()
+    logger.info(f"Current application status: {current_status}")
+    
     if current_status == 'RUNNING':
         logger.info("Stopping application before update...")
         stop_application()
         _wait_for_status(APP_NAME, 'READY', max_wait=300)
+    elif current_status == 'STOPPING':
+        logger.info("Application is already stopping. Waiting for READY status...")
+        _wait_for_status(APP_NAME, 'READY', max_wait=300)
+    elif current_status != 'READY':
+        raise Exception(f"Cannot update application in {current_status} state. Expected READY or RUNNING.")
     
     try:
         app_version = _get_application_version()
@@ -501,17 +508,26 @@ def _wait_for_status(app_name: str, target_status: str, max_wait: int = 300) -> 
     start_time = time.time()
     poll_interval = 10
     
+    # Valid transitional states that can lead to target status
+    valid_transitions = {
+        'READY': ['STOPPING', 'UPDATING'],
+        'RUNNING': ['STARTING', 'UPDATING']
+    }
+    
     while (time.time() - start_time) < max_wait:
         status = _get_application_status()
-        logger.info(f"Current status: {status}, target: {target_status}")
+        logger.info(f"Current status: {status}, target: {target_status}, elapsed: {int(time.time() - start_time)}s")
         
         if status == target_status:
             logger.info(f"Application reached {target_status} status")
             return
         
-        if status in ['STOPPING', 'DELETING']:
-            raise Exception(f"Application entered unexpected state: {status}")
+        # Check if current status is a valid transition to target
+        if target_status in valid_transitions:
+            if status not in valid_transitions[target_status] and status != target_status:
+                # If not in valid transition states, it might be stuck
+                logger.warning(f"Application in unexpected state {status} while waiting for {target_status}")
         
         time.sleep(poll_interval)
     
-    raise TimeoutError(f"Timeout waiting for application to reach {target_status} status")
+    raise TimeoutError(f"Timeout waiting for application to reach {target_status} status after {max_wait}s")
