@@ -28,6 +28,14 @@ variable "output_table_name" {
   type = string
 }
 
+variable "kinesis_stream_name" {
+  type = string
+}
+
+variable "kinesis_stream_arn" {
+  type = string
+}
+
 variable "log_group_name" {
   type = string
 }
@@ -63,6 +71,8 @@ resource "aws_lambda_function" "flink_lifecycle" {
       REGION               = var.region
       FLINK_ROLE_ARN       = var.flink_role_arn
       STREAMING_APP_BUCKET = var.streaming_app_bucket
+      KINESIS_STREAM_NAME  = var.kinesis_stream_name
+      KINESIS_STREAM_ARN   = var.kinesis_stream_arn
       OUTPUT_DATA_BUCKET   = var.output_data_bucket
       OUTPUT_TABLE_NAME    = var.output_table_name
       LOG_GROUP_NAME       = var.log_group_name

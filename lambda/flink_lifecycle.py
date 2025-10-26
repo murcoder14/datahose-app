@@ -9,6 +9,8 @@ Environment Variables:
     REGION: AWS region
     FLINK_ROLE_ARN: IAM role ARN for Flink execution
     STREAMING_APP_BUCKET: S3 bucket containing application JAR
+    KINESIS_STREAM_NAME: Kinesis Data Stream name for input data
+    KINESIS_STREAM_ARN: Kinesis Data Stream ARN for input data
     OUTPUT_DATA_BUCKET: S3 bucket for output data
     OUTPUT_TABLE_NAME: Output table/folder name
     LOG_GROUP_NAME: CloudWatch log group name
@@ -37,6 +39,8 @@ APP_NAME = os.environ['APP_NAME']
 REGION = os.environ['REGION']
 FLINK_ROLE_ARN = os.environ['FLINK_ROLE_ARN']
 STREAMING_APP_BUCKET = os.environ['STREAMING_APP_BUCKET']
+KINESIS_STREAM_NAME = os.environ['KINESIS_STREAM_NAME']
+KINESIS_STREAM_ARN = os.environ['KINESIS_STREAM_ARN']
 OUTPUT_DATA_BUCKET = os.environ['OUTPUT_DATA_BUCKET']
 OUTPUT_TABLE_NAME = os.environ['OUTPUT_TABLE_NAME']
 LOG_GROUP_NAME = os.environ['LOG_GROUP_NAME']
@@ -234,13 +238,14 @@ def _create_application(jar_version: str) -> Dict[str, Any]:
                         {
                             'PropertyGroupId': 'KinesisSource',
                             'PropertyMap': {
+                                'stream.arn': KINESIS_STREAM_ARN,
                                 'aws.region': REGION
                             }
                         },
                         {
                             'PropertyGroupId': 'S3Sink',
                             'PropertyMap': {
-                                'output-bucket': OUTPUT_DATA_BUCKET,
+                                'bucket': OUTPUT_DATA_BUCKET,
                                 'table': OUTPUT_TABLE_NAME
                             }
                         }
@@ -312,10 +317,19 @@ def _update_application(jar_version: str) -> Dict[str, Any]:
                     }
                 },
                 'FlinkApplicationConfigurationUpdate': {
+                    'CheckpointConfigurationUpdate': {
+                        'ConfigurationTypeUpdate': 'DEFAULT'
+                    },
                     'MonitoringConfigurationUpdate': {
                         'ConfigurationTypeUpdate': 'CUSTOM',
                         'LogLevelUpdate': 'INFO',
                         'MetricsLevelUpdate': 'APPLICATION'
+                    },
+                    'ParallelismConfigurationUpdate': {
+                        'ConfigurationTypeUpdate': 'CUSTOM',
+                        'ParallelismUpdate': FLINK_PARALLELISM,
+                        'ParallelismPerKPUUpdate': 1,
+                        'AutoScalingEnabledUpdate': False
                     }
                 },
                 'EnvironmentPropertyUpdates': {
@@ -323,13 +337,14 @@ def _update_application(jar_version: str) -> Dict[str, Any]:
                         {
                             'PropertyGroupId': 'KinesisSource',
                             'PropertyMap': {
+                                'stream.arn': KINESIS_STREAM_ARN,
                                 'aws.region': REGION
                             }
                         },
                         {
                             'PropertyGroupId': 'S3Sink',
                             'PropertyMap': {
-                                'output-bucket': OUTPUT_DATA_BUCKET,
+                                'bucket': OUTPUT_DATA_BUCKET,
                                 'table': OUTPUT_TABLE_NAME
                             }
                         }

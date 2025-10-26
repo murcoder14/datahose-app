@@ -28,6 +28,19 @@ variable "output_table_name" {
   default     = "datalake"
 }
 
+# Kinesis Configuration
+variable "kinesis_shard_count" {
+  description = "Number of shards for Kinesis Data Stream"
+  type        = number
+  default     = 1
+}
+
+variable "kinesis_retention_period" {
+  description = "Data retention period in hours for Kinesis stream (24-8760)"
+  type        = number
+  default     = 24
+}
+
 variable "flink_version" {
   description = "Flink runtime version"
   type        = string

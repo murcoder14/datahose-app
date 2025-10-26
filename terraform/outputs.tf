@@ -3,6 +3,16 @@ output "streaming_app_bucket" {
   value       = module.s3_buckets.streaming_app_bucket_name
 }
 
+output "kinesis_stream_name" {
+  description = "Kinesis Data Stream name for input data"
+  value       = module.kinesis.stream_name
+}
+
+output "kinesis_stream_arn" {
+  description = "Kinesis Data Stream ARN"
+  value       = module.kinesis.stream_arn
+}
+
 output "output_data_bucket" {
   description = "S3 bucket for output data"
   value       = module.s3_buckets.output_data_bucket_name
@@ -63,7 +73,10 @@ output "deployment_commands" {
     # Trigger pipeline manually
     aws codepipeline start-pipeline-execution --name ${module.cicd.pipeline_name} --region ${var.aws_region}
     
-    # View output data
+    # Send test data to Kinesis stream
+    aws kinesis put-record --stream-name ${module.kinesis.stream_name} --partition-key test --data '{"name":"Alice","visits":5}' --region ${var.aws_region}
+    
+    # View output data in S3
     aws s3 ls s3://${module.s3_buckets.output_data_bucket_name}/${var.output_table_name}/ --recursive --region ${var.aws_region}
   EOT
 }

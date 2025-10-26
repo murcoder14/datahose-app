@@ -20,6 +20,10 @@ variable "output_data_bucket" {
   type = string
 }
 
+variable "kinesis_stream_arn" {
+  type = string
+}
+
 variable "log_group_name" {
   type = string
 }
@@ -87,7 +91,7 @@ resource "aws_iam_policy" "flink" {
           "kinesis:ListShards"
         ]
         Resource = [
-          "arn:aws:kinesis:${var.region}:${var.account_id}:stream/*"
+          var.kinesis_stream_arn
         ]
       },
       {

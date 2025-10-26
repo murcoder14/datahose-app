@@ -51,6 +51,16 @@ module "s3_buckets" {
   output_table_name     = var.output_table_name
 }
 
+# Module: Kinesis Data Stream
+module "kinesis" {
+  source = "./modules/kinesis"
+
+  app_name          = var.app_name
+  stream_name       = "${var.app_name}-input-stream"
+  shard_count       = var.kinesis_shard_count
+  retention_period  = var.kinesis_retention_period
+}
+
 # Module: IAM Roles and Policies
 module "iam" {
   source = "./modules/iam"
@@ -60,6 +70,7 @@ module "iam" {
   region               = data.aws_region.current.name
   streaming_app_bucket = module.s3_buckets.streaming_app_bucket_name
   output_data_bucket   = module.s3_buckets.output_data_bucket_name
+  kinesis_stream_arn   = module.kinesis.stream_arn
   log_group_name       = local.log_group_name
 }
 
@@ -82,6 +93,8 @@ module "lambda" {
   lambda_role_arn        = module.iam.lambda_role_arn
   flink_role_arn         = module.iam.flink_role_arn
   streaming_app_bucket   = module.s3_buckets.streaming_app_bucket_name
+  kinesis_stream_name    = module.kinesis.stream_name
+  kinesis_stream_arn     = module.kinesis.stream_arn
   output_data_bucket     = module.s3_buckets.output_data_bucket_name
   output_table_name      = var.output_table_name
   log_group_name         = local.log_group_name
