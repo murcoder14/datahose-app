@@ -102,6 +102,18 @@ module "lambda" {
   flink_parallelism      = var.flink_parallelism
 }
 
+# Module: Flink Application Lifecycle Management
+# This ensures the Flink app is properly deleted during terraform destroy
+module "flink_lifecycle" {
+  source = "./modules/flink"
+
+  app_name             = var.app_name
+  region               = data.aws_region.current.name
+  lambda_function_name = module.lambda.function_name
+
+  depends_on = [module.lambda]
+}
+
 # Module: CI/CD Pipeline (CodePipeline + CodeBuild)
 module "cicd" {
   source = "./modules/cicd"
