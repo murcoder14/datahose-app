@@ -48,6 +48,11 @@ resource "aws_kinesis_stream" "input_stream" {
     Name        = "Input Data Stream"
     Application = var.app_name
   }
+
+  # Prevent accidental deletion of the stream with data
+  lifecycle {
+    prevent_destroy = false  # Set to true to prevent accidental deletion
+  }
 }
 
 # Outputs
