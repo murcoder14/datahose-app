@@ -46,10 +46,11 @@ resource "null_resource" "flink_app_lifecycle" {
         
         # Stop if running
         if [ "$STATUS" = "RUNNING" ]; then
-          echo "Stopping application..."
+          echo "Stopping application without snapshot (force stop)..."
           aws kinesisanalyticsv2 stop-application \
             --application-name ${self.triggers.app_name} \
-            --region ${self.triggers.region} || true
+            --region ${self.triggers.region} \
+            --force || true
           
           echo "Waiting for application to stop..."
           for i in {1..30}; do
