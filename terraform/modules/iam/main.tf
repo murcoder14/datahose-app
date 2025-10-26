@@ -247,6 +247,15 @@ resource "aws_iam_policy" "lambda" {
           "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${var.app_name}-*",
           "arn:aws:logs:${var.region}:${var.account_id}:log-group:${var.log_group_name}:*"
         ]
+      },
+      {
+        Sid    = "CodePipelineIntegration"
+        Effect = "Allow"
+        Action = [
+          "codepipeline:PutJobSuccessResult",
+          "codepipeline:PutJobFailureResult"
+        ]
+        Resource = "*"
       }
     ]
   })
