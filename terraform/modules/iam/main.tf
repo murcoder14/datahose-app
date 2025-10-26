@@ -16,10 +16,6 @@ variable "streaming_app_bucket" {
   type = string
 }
 
-variable "input_data_bucket" {
-  type = string
-}
-
 variable "output_data_bucket" {
   type = string
 }
@@ -82,17 +78,16 @@ resource "aws_iam_policy" "flink" {
         ]
       },
       {
-        Sid    = "ReadFromInputDataBucket"
+        Sid    = "ReadFromKinesisDataStream"
         Effect = "Allow"
         Action = [
-          "s3:GetObject",
-          "s3:GetObjectVersion",
-          "s3:ListBucket",
-          "s3:GetBucketLocation"
+          "kinesis:DescribeStream",
+          "kinesis:GetShardIterator",
+          "kinesis:GetRecords",
+          "kinesis:ListShards"
         ]
         Resource = [
-          "arn:aws:s3:::${var.input_data_bucket}",
-          "arn:aws:s3:::${var.input_data_bucket}/*"
+          "arn:aws:kinesis:${var.region}:${var.account_id}:stream/*"
         ]
       },
       {

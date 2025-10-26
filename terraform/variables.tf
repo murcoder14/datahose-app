@@ -22,12 +22,6 @@ variable "bucket_suffix" {
   default     = ""
 }
 
-variable "input_table_name" {
-  description = "S3 input table/folder name"
-  type        = string
-  default     = "datafall"
-}
-
 variable "output_table_name" {
   description = "S3 output table/folder name"
   type        = string

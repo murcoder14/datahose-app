@@ -33,7 +33,6 @@ resource "random_id" "bucket_suffix" {
 locals {
   bucket_suffix         = var.bucket_suffix != "" ? var.bucket_suffix : "${formatdate("YYYYMMDD", timestamp())}-${random_id.bucket_suffix[0].hex}"
   streaming_app_bucket  = "tm-streaming-app-bucket-${local.bucket_suffix}"
-  input_data_bucket     = "tm-input-data-bucket-${local.bucket_suffix}"
   output_data_bucket    = "tm-output-data-bucket-${local.bucket_suffix}"
   log_group_name        = "/aws/kinesis-analytics/${var.app_name}"
 }
@@ -48,9 +47,7 @@ module "s3_buckets" {
 
   app_name              = var.app_name
   streaming_app_bucket  = local.streaming_app_bucket
-  input_data_bucket     = local.input_data_bucket
   output_data_bucket    = local.output_data_bucket
-  input_table_name      = var.input_table_name
   output_table_name     = var.output_table_name
 }
 
@@ -62,7 +59,6 @@ module "iam" {
   account_id           = data.aws_caller_identity.current.account_id
   region               = data.aws_region.current.name
   streaming_app_bucket = module.s3_buckets.streaming_app_bucket_name
-  input_data_bucket    = module.s3_buckets.input_data_bucket_name
   output_data_bucket   = module.s3_buckets.output_data_bucket_name
   log_group_name       = local.log_group_name
 }
@@ -86,9 +82,7 @@ module "lambda" {
   lambda_role_arn        = module.iam.lambda_role_arn
   flink_role_arn         = module.iam.flink_role_arn
   streaming_app_bucket   = module.s3_buckets.streaming_app_bucket_name
-  input_data_bucket      = module.s3_buckets.input_data_bucket_name
   output_data_bucket     = module.s3_buckets.output_data_bucket_name
-  input_table_name       = var.input_table_name
   output_table_name      = var.output_table_name
   log_group_name         = local.log_group_name
   flink_version          = var.flink_version

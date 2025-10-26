@@ -9,9 +9,7 @@ Environment Variables:
     REGION: AWS region
     FLINK_ROLE_ARN: IAM role ARN for Flink execution
     STREAMING_APP_BUCKET: S3 bucket containing application JAR
-    INPUT_DATA_BUCKET: S3 bucket for input data
     OUTPUT_DATA_BUCKET: S3 bucket for output data
-    INPUT_TABLE_NAME: Input table/folder name
     OUTPUT_TABLE_NAME: Output table/folder name
     LOG_GROUP_NAME: CloudWatch log group name
     FLINK_VERSION: Flink runtime version (e.g., FLINK-1_20)
@@ -39,9 +37,7 @@ APP_NAME = os.environ['APP_NAME']
 REGION = os.environ['REGION']
 FLINK_ROLE_ARN = os.environ['FLINK_ROLE_ARN']
 STREAMING_APP_BUCKET = os.environ['STREAMING_APP_BUCKET']
-INPUT_DATA_BUCKET = os.environ['INPUT_DATA_BUCKET']
 OUTPUT_DATA_BUCKET = os.environ['OUTPUT_DATA_BUCKET']
-INPUT_TABLE_NAME = os.environ['INPUT_TABLE_NAME']
 OUTPUT_TABLE_NAME = os.environ['OUTPUT_TABLE_NAME']
 LOG_GROUP_NAME = os.environ['LOG_GROUP_NAME']
 FLINK_VERSION = os.environ['FLINK_VERSION']
@@ -242,13 +238,6 @@ def _create_application(jar_version: str) -> Dict[str, Any]:
                             }
                         },
                         {
-                            'PropertyGroupId': 'S3Source',
-                            'PropertyMap': {
-                                'input-bucket': INPUT_DATA_BUCKET,
-                                'table': INPUT_TABLE_NAME
-                            }
-                        },
-                        {
                             'PropertyGroupId': 'S3Sink',
                             'PropertyMap': {
                                 'output-bucket': OUTPUT_DATA_BUCKET,
@@ -335,13 +324,6 @@ def _update_application(jar_version: str) -> Dict[str, Any]:
                             'PropertyGroupId': 'KinesisSource',
                             'PropertyMap': {
                                 'aws.region': REGION
-                            }
-                        },
-                        {
-                            'PropertyGroupId': 'S3Source',
-                            'PropertyMap': {
-                                'input-bucket': INPUT_DATA_BUCKET,
-                                'table': INPUT_TABLE_NAME
                             }
                         },
                         {

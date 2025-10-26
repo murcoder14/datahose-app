@@ -20,15 +20,7 @@ variable "streaming_app_bucket" {
   type = string
 }
 
-variable "input_data_bucket" {
-  type = string
-}
-
 variable "output_data_bucket" {
-  type = string
-}
-
-variable "input_table_name" {
   type = string
 }
 
@@ -71,9 +63,7 @@ resource "aws_lambda_function" "flink_lifecycle" {
       REGION               = var.region
       FLINK_ROLE_ARN       = var.flink_role_arn
       STREAMING_APP_BUCKET = var.streaming_app_bucket
-      INPUT_DATA_BUCKET    = var.input_data_bucket
       OUTPUT_DATA_BUCKET   = var.output_data_bucket
-      INPUT_TABLE_NAME     = var.input_table_name
       OUTPUT_TABLE_NAME    = var.output_table_name
       LOG_GROUP_NAME       = var.log_group_name
       FLINK_VERSION        = var.flink_version
