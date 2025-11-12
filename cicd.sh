@@ -95,7 +95,7 @@ fi
 log_info "Initializing Java 11 using SDKMAN..."
 if [ -s "$HOME/.sdkman/bin/sdkman-init.sh" ]; then
     source "$HOME/.sdkman/bin/sdkman-init.sh"
-    sdk use java 11.0.28-amzn
+    sdk use java 11.0.29-amzn
     log_info "Java version set to: $(java -version 2>&1 | head -n 1)"
 else
     log_warn "SDKMAN not found. Attempting to use system Java..."
