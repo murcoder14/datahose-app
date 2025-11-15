@@ -17,6 +17,9 @@ buildNumber.properties
 *.swp
 *.swo
 *~
+.classpath
+.project
+.settings/
 
 # OS
 .DS_Store
@@ -30,6 +33,9 @@ Thumbs.db
 *.tmp
 *.bak
 *.backup
+
+# Test inputs
+inputs/
 
 # AWS Configuration (sensitive)
 .aws/

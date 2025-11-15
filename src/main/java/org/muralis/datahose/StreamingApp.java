@@ -18,6 +18,7 @@ import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -166,7 +167,10 @@ public class StreamingApp {
         LOG.info("Analyzing a file - reading from S3 and writing to S3");
 
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-        env.setRuntimeMode(RuntimeExecutionMode.BATCH);
+        // NOTE: BATCH mode is commented out because it uses SortMergeResultPartition which doesn't support
+        // getAllDataProcessedFuture() method, causing UnsupportedOperationException at runtime.
+        // Using default STREAMING mode instead, which uses PipelinedResultPartition.
+        // env.setRuntimeMode(RuntimeExecutionMode.BATCH);
         // NOTE: Checkpointing is automatically handled by AWS Managed Flink every 60s.
 
         String region = null;
@@ -236,14 +240,20 @@ public class StreamingApp {
         Table result = tableEnv.sqlQuery("SELECT f0 as name, SUM(f1) as total FROM " + table + " GROUP BY f0");
 
         // Convert back to DataStream and map to String
-        DataStream<Row> aggregated = tableEnv.toDataStream(result);
+        // Use toChangelogStream() instead of toDataStream() because GroupAggregate produces updates
+        // toDataStream() only accepts INSERT-only streams, but aggregation produces INSERT/UPDATE_BEFORE/UPDATE_AFTER/DELETE
+        DataStream<Row> aggregated = tableEnv.toChangelogStream(result);
 
-        DataStream<String> results = aggregated.map(new MapFunction<Row, String>() {
-            @Override
-            public String map(Row row) {
-                return row.getField(0) + " visited the gym " + row.getField(1) + " times";
-            }
-        });
+        // Filter to only process the final results (UPDATE_AFTER and INSERT rows)
+        // Ignore UPDATE_BEFORE and DELETE rows to get the latest aggregated values
+        DataStream<String> results = aggregated
+                .filter(row -> row.getKind() == RowKind.INSERT || row.getKind() == RowKind.UPDATE_AFTER)
+                .map(new MapFunction<Row, String>() {
+                    @Override
+                    public String map(Row row) {
+                        return row.getField(0) + " visited the gym " + row.getField(1) + " times";
+                    }
+                });
 
         // Your existing FileSink code
         FileSink<String> s3Sink = FileSink
