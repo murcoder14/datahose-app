@@ -1,11 +1,11 @@
 
-# AWS Kinesis Streaming Solution (Flink, Kinesis, S3)
+# AWS Streaming Data Analytics Solution (Flink, S3)
 
-This project provides a complete, production-ready AWS solution for real-time streaming using Apache Flink 1.20 (AWS Managed Flink), Kinesis Data Streams, and S3. It includes all scripts, code, and documentation for end-to-end deployment, testing, and troubleshooting.
+This project provides a complete, production-ready AWS solution for streaming data analytics using Apache Flink 1.20 (AWS Managed Flink) and S3. It demonstrates analytical processing with GROUP BY aggregations and proper changelog handling for bounded stream processing.
 
 **Status:** ✅ Production-ready  
-**Region:** us-east-2  
-**Last Updated:** October 10, 2025
+**Region:** Configurable (uses your AWS CLI profile region)  
+**Last Updated:** November 14, 2025
 
 ---
 
@@ -32,17 +32,26 @@ This project provides a complete, production-ready AWS solution for real-time st
 ## Solution Architecture
 
 ```
+```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                     AWS Cloud (us-east-2)                                   │
+│                     AWS Cloud (Your Configured Region)                      │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ User (test.sh) → Kinesis (lowercase) → Flink (UPPERCASE) → S3 (UPPERCASE)   │
+│ S3 Input (gymvisits.csv) → Flink (Aggregate & Transform) → S3 Output        │
 │                                                                              │
 │  ┌───────────────┐   ┌───────────────┐   ┌───────────────┐   ┌────────────┐  │
-│  │ test.sh      │   │ Kinesis       │   │ Flink         │   │ S3         │  │
-│  │ (producer)   │   │ tm-input-stream│  │ datahose-app  │   │ datafall/  │  │
+│  │ S3 Input     │   │ Flink         │   │ Flink         │   │ S3 Output  │  │
+│  │ gymvisits.csv│──→│ FileSource    │──→│ GroupAggregate│──→│ FileSink   │  │
+│  │              │   │ (Read CSV)    │   │ (SUM by name) │   │ (Results)  │  │
 │  └───────────────┘   └───────────────┘   └───────────────┘   └────────────┘  │
 │                                                                              │
+│  Analytical Processing:                                                     │
+│  • Reads gym visit data from S3                                            │
+│  • Aggregates total visits per person using SQL GROUP BY                   │
+│  • Handles changelog streams (INSERT, UPDATE_BEFORE, UPDATE_AFTER, DELETE) │
+│  • Filters to latest results (INSERT & UPDATE_AFTER only)                  │
+│  • Writes formatted output to S3                                           │
 └──────────────────────────────────────────────────────────────────────────────┘
+```
 ```
 
 ---
@@ -55,27 +64,29 @@ This project provides a complete, production-ready AWS solution for real-time st
 
 ### Flink Application (`datahose-app`)
 - Apache Flink 1.20 (STREAMING mode)
-- Java 11 (SDKMAN: 11.0.28-amzn)
-- Reads from Kinesis Data Stream (`tm-input-stream`)
-- Transforms all data to UPPERCASE
-- Writes to S3 (`datafall/` table)
+- Java 11 (SDKMAN: 11.0.29-amzn)
+- **Input:** Reads CSV files from S3 using FileSource
+- **Processing:** SQL-based aggregation with GROUP BY (Table API)
+- **Changelog Handling:** Uses `toChangelogStream()` to handle update streams
+- **Output:** Writes aggregated results to S3 using FileSink
 - Checkpointing: 60s
-- Rolling Policy: 30s inactivity / 2min max
+- Rolling Policy: 5s rollover / 3s inactivity
 
 ### S3 Buckets
 - **Dynamic Naming:** Buckets are created with the current date and Unix epoch for uniqueness, e.g. `tm-streaming-app-bucket-20251010-1760143646` and `tm-data-bucket-20251010-1760143646`.
 - Application Bucket: `tm-streaming-app-bucket-<date>-<epoch>` (stores JAR)
-- Data Bucket: `tm-data-bucket-<date>-<epoch>` (stores output)
+- Data Bucket: `tm-data-bucket-<date>-<epoch>` (stores input CSV and output results)
   - Buckets are auto-detected by scripts; no need to manually update names after each deployment.
 
-### Kinesis Data Stream
-- Name: `tm-input-stream` (1 shard)
-- Receives lowercase words from `test.sh`
+### Input Data
+- **Format:** CSV file (`gymvisits.csv`)
+- **Schema:** name (STRING), date (STRING)
+- **Location:** `inputs/` directory (local) or S3 input bucket
+- **Example Data:** Gym visit records for aggregation
 
 ### IAM Resources
 - Role: `datahose-app-flink-role` (for Flink)
-- Policy: `datahose-app-flink-policy` (S3, Kinesis, CloudWatch)
-- User Policy: `datahose-app-kinesis-producer-policy` (for test.sh user)
+- Policy: `datahose-app-flink-policy` (S3, CloudWatch)
 
 ### CloudWatch
 - Log Group: `/aws/kinesis-analytics/datahose-app`
@@ -83,27 +94,31 @@ This project provides a complete, production-ready AWS solution for real-time st
 
 ---
 
-## How Kinesis ARN is Passed
+## How Application Configuration Works
 
-The Kinesis Data Stream ARN is passed from the infrastructure to the Flink application using **AWS Managed Flink's Application Properties** feature. This is the recommended and secure way to pass runtime configuration to Flink applications.
+The Flink application reads S3 paths and configuration directly from the code or environment variables. For S3-to-S3 processing:
 
-**Process:**
-1. `iac_create.sh` creates the Kinesis stream and saves the ARN to `/tmp/flink-config.env`.
-2. You run `source /tmp/flink-config.env` to load the ARN as an environment variable.
-3. `cicd.sh` passes the ARN to AWS via Application Properties (PropertyGroups).
-4. Flink app reads the ARN at runtime using `KinesisAnalyticsRuntime.getApplicationProperties()`.
+1. **Input Path:** Configured in `StreamingApp.java` to read from S3 bucket
+2. **Output Path:** Configured in `StreamingApp.java` to write to S3 bucket
+3. **Environment Variables:** Can be passed via AWS Managed Flink Application Properties if needed
 
 **Key Java code:**
 ```java
-Map<String, Properties> applicationProperties = KinesisAnalyticsRuntime.getApplicationProperties();
-Properties kinesisProps = applicationProperties.getOrDefault("KinesisSource", new Properties());
-String streamArn = kinesisProps.getProperty("stream.arn");
+// S3 paths configured in the application
+String s3InputPath = "s3a://your-input-bucket/gymvisits.csv";
+String s3OutputPath = "s3a://your-output-bucket/results/";
+
+// Create FileSource to read from S3
+FileSource<String> source = FileSource
+    .forRecordStreamFormat(new TextLineInputFormat(), new Path(s3InputPath))
+    .build();
 ```
 
 **Benefits:**
-- No ARN in source code or Git
-- Change stream without rebuilding
-- AWS best practice
+- No external dependencies like Kinesis
+- Simple file-based processing
+- Easy to test locally with file paths
+- AWS best practice for batch/bounded stream processing
 
 ---
 
@@ -116,8 +131,8 @@ String streamArn = kinesisProps.getProperty("stream.arn");
 2. **Maven** (3.x+)
 3. **Java 11** (via SDKMAN recommended)
 4. **jq** (for JSON parsing)
-5. **AWS credentials** with permissions for IAM, S3, Kinesis, CloudWatch
-6. **Region:** us-east-2
+5. **AWS credentials** with permissions for IAM, S3, CloudWatch
+6. **AWS Region** configured in your AWS CLI profile (e.g., via `aws configure`)
 
 ---
 
@@ -126,7 +141,7 @@ String streamArn = kinesisProps.getProperty("stream.arn");
 
 ### 1. Set Java Version (REQUIRED in every new terminal)
 ```bash
-sdk use java 11.0.28-amzn
+sdk use java 11.0.29-amzn
 ```
 
 ### 2. Create Infrastructure (Dynamic Buckets)
@@ -146,19 +161,18 @@ sdk use java 11.0.28-amzn
 # No need to source config; always checks the latest buckets.
 ```
 
-### 5. Send Test Data
+### 5. Upload Input Data (Optional for testing)
 ```bash
-./test.sh
-# Sends 5 random lowercase words every 5 seconds
-# Press Ctrl+C to stop
+# Upload sample CSV to S3 input bucket
+aws s3 cp inputs/gymvisits.csv s3://<your-input-bucket>/
 ```
 
 ### 6. Monitor Logs & Output
 ```bash
 aws logs tail /aws/kinesis-analytics/datahose-app --follow
-aws s3 ls s3://<latest-tm-data-bucket-*>/datafall/ --recursive
-aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--XX/part-0-0 - | head -20
-# Output should be UPPERCASE
+aws s3 ls s3://<latest-tm-data-bucket-*>/results/ --recursive
+aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -20
+# Output should show aggregated gym visits per person
 ```
 
 ---
@@ -210,7 +224,7 @@ aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--XX/part-0-0 - | he
 export APP_NAME="datahose-app"
 export STREAMING_APP_BUCKET="tm-streaming-app-bucket-20251010"
 export DATA_BUCKET="tm-data-bucket-20251010"
-export REGION="us-east-2"
+export REGION="<your-aws-region>"  # Detected from AWS CLI profile
 export FLINK_ROLE_ARN="arn:aws:iam::ACCOUNT_ID:role/datahose-app-flink-role"
 ```
 
@@ -296,18 +310,10 @@ source /tmp/flink-config.env
   2025-10-10 20:47:40 tm-data-bucket-20251010-1760143646
   ...
 
-=== Kinesis Data Stream ===
-[✓] Kinesis stream exists: tm-input-stream
-[✓] Stream status: ACTIVE ✓
-[✓] Shard count: 1
-[✓] Stream ARN: arn:aws:kinesis:us-east-2:047472788728:stream/tm-input-stream
-
 === IAM Resources ===
 [✓] IAM Role exists: datahose-app-flink-role
 [✓] Role ARN: arn:aws:iam::047472788728:role/datahose-app-flink-role
 [✓] Attached policies: 1
-[✓] User policy exists: datahose-app-kinesis-producer-policy
-[✓] Policy attached to user sunny0524 ✓
 
 === CloudWatch Logs ===
 [✓] Log group exists: /aws/kinesis-analytics/datahose-app
@@ -326,7 +332,7 @@ source /tmp/flink-config.env
 ...
 
 === Summary ===
-Health Score: 8/8 checks passed
+Health Score: 7/7 checks passed
 [✓] All systems operational! ✓
 ```
 
@@ -371,18 +377,67 @@ Health Score: 8/8 checks passed
 **File:** `src/main/java/org/muralis/datahose/StreamingApp.java`
 
 **Key Features:**
-- Reads from Kinesis Data Stream (`tm-input-stream`)
-- Transforms all data to UPPERCASE using MapFunction
-- Writes to S3 (`datafall/` table)
-- Checkpointing: 60s
-- Rolling Policy: 30s inactivity / 2min max
+- **S3-to-S3 Analytical Processing:** Reads CSV data from S3, performs aggregations, writes results to S3
+- **SQL-based Aggregation:** Uses Flink Table API with SQL GROUP BY to sum gym visits per person
+- **Changelog Stream Handling:** Properly handles update streams produced by aggregation operations
+- **Bounded Stream Processing:** Processes finite datasets from S3 files
+- **Checkpointing:** 60s intervals for fault tolerance
+- **Rolling Policy:** 5s rollover, 3s inactivity for output files
 
-**Transformation Example:**
-```java
-DataStream<String> transformedStream = inputStream.map(
-  value -> value.toUpperCase()
-);
+### Analytical Processing Details
+
+#### The Challenge: GroupAggregate and Changelog Modes
+
+When performing aggregations in Flink using GROUP BY operations, the query produces a **changelog stream** with multiple types of changes:
+
+- **INSERT**: Initial record for a group
+- **UPDATE_BEFORE**: Old value before an update
+- **UPDATE_AFTER**: New value after an update  
+- **DELETE**: Record removal
+
+**Example:** If "Alice" visits the gym multiple times:
 ```
+Row 1: +I[Alice, 1]           # INSERT: Alice has 1 visit
+Row 2: -U[Alice, 1]           # UPDATE_BEFORE: Old value (1 visit)
+Row 3: +U[Alice, 2]           # UPDATE_AFTER: New value (2 visits)
+```
+
+#### The Solution: toChangelogStream()
+
+**Problem:** Using `toDataStream()` creates an anonymous DataStream sink that only accepts **INSERT-only** changelog mode, causing this error:
+```
+TableException: Table sink doesn't support consuming update changes 
+which is produced by node GroupAggregate(groupBy=[f0], select=[f0, SUM(f1) AS total])
+```
+
+**Solution:** Changed from `toDataStream()` to `toChangelogStream()`:
+- `toChangelogStream()` accepts **all changelog modes** including updates
+- Added filtering to process only `INSERT` and `UPDATE_AFTER` rows
+- Ignores `UPDATE_BEFORE` and `DELETE` rows to get the latest aggregated values
+
+**Code Example:**
+```java
+// Perform SQL aggregation
+Table result = tableEnv.sqlQuery("SELECT f0 as name, SUM(f1) as total FROM " + table + " GROUP BY f0");
+
+// Use toChangelogStream() instead of toDataStream() for aggregations
+DataStream<Row> aggregated = tableEnv.toChangelogStream(result);
+
+// Filter to only process final results (INSERT and UPDATE_AFTER)
+DataStream<String> results = aggregated
+    .filter(row -> row.getKind() == RowKind.INSERT || row.getKind() == RowKind.UPDATE_AFTER)
+    .map(row -> row.getField(0) + " visited the gym " + row.getField(1) + " times");
+```
+
+#### Why This Matters
+
+- **Correctness:** Ensures only the latest aggregated values are written to output
+- **Performance:** Avoids writing intermediate updates that would be overwritten
+- **Best Practice:** Follows Flink's recommended pattern for handling changelog streams from aggregations
+
+#### References
+- [Apache Flink Changelog Mode Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/table/data_stream_api/#handling-of-changelog-streams)
+- [Flink Source Code: FlinkChangelogModeInferenceProgram.scala](https://github.com/apache/flink/blob/main/flink-table/flink-table-planner/src/main/scala/org/apache/flink/table/planner/plan/optimize/program/FlinkChangelogModeInferenceProgram.scala)
 
 ---
 
@@ -392,20 +447,25 @@ datafall/
 
 ## Data Structure
 
-### S3 Table: `datafall`
+### S3 Table: `results` or `datafall`
 
-**Location:** `s3://tm-data-bucket-<date>-<epoch>/datafall/` (auto-detected by scripts)
+**Location:** `s3://tm-data-bucket-<date>-<epoch>/results/` (or `/datafall/` depending on configuration)
 
-**Schema:**
-| Column | Type    | Description                        |
-|--------|---------|------------------------------------|
-| foams  | STRING  | Streaming data (UPPERCASE)         |
+**Output Format:**
+Formatted text strings with aggregated gym visit counts per person.
+
+**Example Output:**
+```
+Alice visited the gym 25 times
+Bob visited the gym 18 times
+Carol visited the gym 30 times
+```
 
 **Directory Structure:**
 ```
-datafall/
-├── 2025-10-10--17/
-│   ├── part-0-0                    # Finalized file
+results/  (or datafall/)
+├── 2025-11-14--17/
+│   ├── part-0-0                    # Finalized file with aggregated results
 │   ├── part-0-1                    # Finalized file
 │   └── .part-0-2.inprogress.xyz    # In-progress
 ├── ...
@@ -414,10 +474,10 @@ datafall/
 **Querying Data:**
 ```bash
 # List files
-aws s3 ls s3://<latest-tm-data-bucket-*>/datafall/ --recursive
+aws s3 ls s3://<latest-tm-data-bucket-*>/results/ --recursive
 # View sample
-aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--17/part-0-0 - | head -10
-# Should be UPPERCASE
+aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -10
+# Should show aggregated visit counts per person
 ```
 
 ---
@@ -427,11 +487,10 @@ aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--17/part-0-0 - | he
 
 ## Testing & Monitoring
 
-### Send Test Data
+### Upload Test Data
 ```bash
-./test.sh
-# Sends 5 random lowercase words every 5 seconds
-# Press Ctrl+C to stop
+# Upload sample CSV to S3
+aws s3 cp inputs/gymvisits.csv s3://<your-input-bucket>/gymvisits.csv
 ```
 
 ### Monitor Logs
@@ -441,9 +500,9 @@ aws logs tail /aws/kinesis-analytics/datahose-app --follow
 
 ### Check S3 Output
 ```bash
-aws s3 ls s3://<latest-tm-data-bucket-*>/datafall/ --recursive
-aws s3 cp s3://<latest-tm-data-bucket-*>/datafall/2025-10-10--XX/part-0-0 - | head -20
-# Output should be UPPERCASE
+aws s3 ls s3://<latest-tm-data-bucket-*>/results/ --recursive
+aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -20
+# Output should show: "Alice visited the gym 25 times", etc.
 ```
 
 ---
@@ -465,22 +524,17 @@ aws kinesisanalyticsv2 describe-application --application-name datahose-app
 ```bash
 aws s3 ls s3://<latest-tm-data-bucket-*>/
 aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error"
-# Wait at least 2 minutes for first file
+# Wait at least 5 seconds for first file (rolling policy)
 ```
 
-### test.sh fails
-```bash
-aws kinesis describe-stream --stream-name tm-input-stream
-aws iam list-attached-user-policies --user-name <your-user>
-```
-
-### Data not uppercase
-- Check application logs for transformation errors
+### Data aggregation incorrect
+- Check application logs for SQL errors
+- Verify input CSV format matches expected schema
 - Rebuild and redeploy: `./cicd.sh`
 
 ### Region or Java version issues
-- Always set region to us-east-2
-- Always run `sdk use java 11.0.28-amzn` in every new terminal
+- Verify your AWS region is configured: `aws configure get region`
+- Always run `sdk use java 11.0.29-amzn` in every new terminal
 
 ---
 
@@ -528,9 +582,10 @@ aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|err
 ```
 
 **Possible Causes:**
-1. **Timing:** Wait at least 2 minutes after start for first file
-2. **Path Issue:** Check application logs for S3 write errors
-3. **Permissions:** Verify IAM role has PutObject permission
+1. **Timing:** Wait at least 5 seconds after start for first file (rolling policy)
+2. **Path Issue:** Check application logs for S3 read/write errors
+3. **Permissions:** Verify IAM role has GetObject and PutObject permissions
+4. **Input Data:** Ensure input CSV file exists in the configured S3 location
 
 ### Region Mismatch
 
@@ -541,13 +596,13 @@ aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|err
 # Check configured region
 aws configure get region
 
-# Should output: us-east-2
+# Should output your intended region (e.g., us-east-1, us-west-2, etc.)
 ```
 
 **Fix:**
 ```bash
-# Set correct region
-aws configure set region us-east-2
+# Set your desired region
+aws configure set region <your-preferred-region>
 
 # Re-run scripts
 ./iac_create.sh
@@ -570,7 +625,7 @@ which java
 **Fix:**
 ```bash
 # RECOMMENDED: Use SDKMAN to set Java 11 (required in EVERY new shell session)
-sdk use java 11.0.28-amzn
+sdk use java 11.0.29-amzn
 
 # Verify it's set correctly
 java -version
@@ -581,57 +636,6 @@ export JAVA_HOME=$(dirname $(dirname $(which java)))
 # OR: Run the setup script which does this automatically
 ./setup-env.sh
 ```
-
-**Prevention:**
-- **Always run `sdk use java 11.0.28-amzn` when opening a new terminal**
-- Or add this to your `~/.bashrc` or `~/.zshrc`:
-  ```bash
-  # Auto-initialize SDKMAN and Java 11
-  export SDKMAN_DIR="$HOME/.sdkman"
-  [[ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]] && source "$SDKMAN_DIR/bin/sdkman-init.sh"
-  sdk use java 11.0.28-amzn 2>/dev/null
-  ```
-
-### Maven Build Fails
-
-**Symptom:** `mvn clean package` fails
-
-**Diagnosis:**
-```bash
-# Check Maven version
-mvn --version
-
-# Check pom.xml exists
-ls -l pom.xml
-```
-
-**Fix:**
-```bash
-# Clean Maven cache
-mvn clean
-
-# Rebuild
-mvn package -DskipTests
-
-# If dependencies fail, update Maven
-sdk install maven 3.9.11
-```
-
-### Script Permission Denied
-
-**Symptom:** `bash: ./script.sh: Permission denied`
-
-**Fix:**
-```bash
-# Make scripts executable
-chmod +x *.sh
-
-# Or run with bash
-bash iac_create.sh
-```
-
----
-
 
 ## Clean Up
 
@@ -658,11 +662,10 @@ This removes:
 | Service              | Usage         | Estimated Cost |
 |----------------------|--------------|----------------|
 | Managed Flink        | 1 KPU, 24/7  | ~$45           |
-| Kinesis Data Stream  | 1 shard      | ~$15           |
 | S3 Storage           | ~100 GB      | ~$2.30         |
 | CloudWatch           | Logs/metrics | ~$2            |
 | Data Transfer        | Minimal      | ~$0.50         |
-| **Total**            |              | **~$65/month** |
+| **Total**            |              | **~$50/month** |
 
 ---
 
@@ -695,10 +698,11 @@ datahose-app/
 ## Technologies Used
 
 - Apache Flink 1.20
-- Java 11 (SDKMAN: 11.0.28-amzn)
+- Java 11 (SDKMAN: 11.0.29-amzn)
 - Maven 3.x
 - AWS Managed Service for Apache Flink
-- Amazon S3
+- Amazon S3 (FileSource & FileSink)
+- Flink Table API & SQL
 - AWS IAM
 - Amazon CloudWatch
 - AWS CLI
@@ -713,13 +717,13 @@ datahose-app/
 
 - [Apache Flink Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.20/)
 - [AWS Managed Service for Apache Flink](https://docs.aws.amazon.com/kinesisanalytics/)
-- [Flink Kinesis Connector](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/connectors/datastream/kinesis/)
-- [AWS Kinesis Data Streams](https://docs.aws.amazon.com/streams/latest/dev/fundamental-stream.html)
+- [Flink DataStream API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/datastream/overview/)
+- [Flink Table API & Changelog Streams](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/table/data_stream_api/#handling-of-changelog-streams)
 
 ---
 
 **License:** For educational and demonstration purposes.
 
-**Last Updated:** October 10, 2025  
-**Version:** 1.0  
-**Region:** us-east-2
+**Last Updated:** November 14, 2025  
+**Version:** 2.0  
+**Region:** Configurable (uses your AWS CLI profile region)
