@@ -1,11 +1,11 @@
 
 # AWS Streaming Data Analytics Solution (Flink, S3)
 
-This project provides a complete, production-ready AWS solution for streaming data analytics using Apache Flink 1.20 (AWS Managed Flink) and S3. It demonstrates analytical processing with GROUP BY aggregations and proper changelog handling for bounded stream processing.
+This project provides a complete, production-ready AWS solution for streaming data analytics using Apache Flink 1.19 (AWS Managed Flink) and S3. It demonstrates **batch-style aggregation** on bounded streams using stateful processing with `KeyedProcessFunction` to emit only final aggregated results.
 
 **Status:** ✅ Production-ready  
 **Region:** Configurable (uses your AWS CLI profile region)  
-**Last Updated:** November 14, 2025
+**Last Updated:** November 16, 2025
 
 ---
 
@@ -36,19 +36,20 @@ This project provides a complete, production-ready AWS solution for streaming da
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                     AWS Cloud (Your Configured Region)                      │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ S3 Input (gymvisits.csv) → Flink (Aggregate & Transform) → S3 Output        │
+│ S3 Input (gymvisits.csv) → Flink (Batch Aggregation) → S3 Output           │
 │                                                                              │
 │  ┌───────────────┐   ┌───────────────┐   ┌───────────────┐   ┌────────────┐  │
-│  │ S3 Input     │   │ Flink         │   │ Flink         │   │ S3 Output  │  │
-│  │ gymvisits.csv│──→│ FileSource    │──→│ GroupAggregate│──→│ FileSink   │  │
-│  │              │   │ (Read CSV)    │   │ (SUM by name) │   │ (Results)  │  │
+│  │ S3 Input     │   │ Flink         │   │ Keyed         │   │ S3 Output  │  │
+│  │ gymvisits.csv│──→│ FileSource    │──→│ ProcessFunc   │──→│ FileSink   │  │
+│  │              │   │ (Read CSV)    │   │ (Accumulate)  │   │ (Results)  │  │
 │  └───────────────┘   └───────────────┘   └───────────────┘   └────────────┘  │
 │                                                                              │
-│  Analytical Processing:                                                     │
-│  • Reads gym visit data from S3                                            │
-│  • Aggregates total visits per person using SQL GROUP BY                   │
-│  • Handles changelog streams (INSERT, UPDATE_BEFORE, UPDATE_AFTER, DELETE) │
-│  • Filters to latest results (INSERT & UPDATE_AFTER only)                  │
+│  Batch-Style Aggregation:                                                   │
+│  • Reads gym visit data from S3 (bounded stream)                           │
+│  • Accumulates visit counts per person in keyed state                      │
+│  • Uses KeyedProcessFunction with event-time timer at Long.MAX_VALUE       │
+│  • Emits only final aggregated totals when bounded input completes         │
+│  • No intermediate outputs - pure batch aggregation in streaming mode      │
 │  • Writes formatted output to S3                                           │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -63,12 +64,12 @@ This project provides a complete, production-ready AWS solution for streaming da
 
 
 ### Flink Application (`datahose-app`)
-- Apache Flink 1.20 (STREAMING mode)
+- Apache Flink 1.19 (STREAMING mode)
 - Java 11 (SDKMAN: 11.0.29-amzn)
-- **Input:** Reads CSV files from S3 using FileSource
-- **Processing:** SQL-based aggregation with GROUP BY (Table API)
-- **Changelog Handling:** Uses `toChangelogStream()` to handle update streams
-- **Output:** Writes aggregated results to S3 using FileSink
+- **Input:** Reads CSV files from S3 using FileSource (bounded streams)
+- **Processing:** Batch-style aggregation using KeyedProcessFunction with stateful accumulation
+- **Key Innovation:** Event-time timer at Long.MAX_VALUE ensures emission only when bounded input completes
+- **Output:** Writes final aggregated results to S3 using FileSink (no intermediate outputs)
 - Checkpointing: 60s
 - Rolling Policy: 5s rollover / 3s inactivity
 
@@ -378,81 +379,143 @@ Health Score: 7/7 checks passed
 
 **Key Features:**
 - **S3-to-S3 Analytical Processing:** Reads CSV data from S3, performs aggregations, writes results to S3
-- **SQL-based Aggregation:** Uses Flink Table API with SQL GROUP BY to sum gym visits per person
-- **Changelog Stream Handling:** Properly handles update streams produced by aggregation operations
-- **Bounded Stream Processing:** Processes finite datasets from S3 files
+- **Stateful Batch Aggregation:** Uses KeyedProcessFunction with ValueState to accumulate counts
+- **Event-Time Timer Pattern:** Registers timer at Long.MAX_VALUE - 1 to detect end of bounded input
+- **Single Emission per Key:** Outputs only final aggregated totals (no intermediate results)
 - **Checkpointing:** 60s intervals for fault tolerance
 - **Rolling Policy:** 5s rollover, 3s inactivity for output files
 
-### Analytical Processing Details
+### Batch-Style Aggregation in Streaming Mode
 
-#### The Challenge: GroupAggregate and Changelog Modes
+#### The Challenge: AWS Managed Flink and BATCH Mode
 
-When performing aggregations in Flink using GROUP BY operations, the query produces a **changelog stream** with multiple types of changes:
+Multiple approaches were attempted to achieve proper batch aggregation:
 
-- **INSERT**: Initial record for a group
-- **UPDATE_BEFORE**: Old value before an update
-- **UPDATE_AFTER**: New value after an update  
-- **DELETE**: Record removal
+1. **Table API with GROUP BY:** Produces changelog streams with UPDATE_BEFORE/UPDATE_AFTER rows
+   - `toChangelogStream().filter(INSERT)` only captures first occurrence
+   - `toDataStream()` rejected by planner for updating tables
+   - SQL projections maintain update semantics
 
-**Example:** If "Alice" visits the gym multiple times:
-```
-Row 1: +I[Alice, 1]           # INSERT: Alice has 1 visit
-Row 2: -U[Alice, 1]           # UPDATE_BEFORE: Old value (1 visit)
-Row 3: +U[Alice, 2]           # UPDATE_AFTER: New value (2 visits)
-```
+2. **Windowing Approaches:** GlobalWindows with CountTrigger fire on every element (incremental outputs)
 
-#### The Solution: toChangelogStream()
+3. **RuntimeExecutionMode.BATCH:** AWS Managed Flink throws `UnsupportedOperationException`:
+   ```
+   ResultPartition.getAllDataProcessedFuture not supported
+   ```
 
-**Problem:** Using `toDataStream()` creates an anonymous DataStream sink that only accepts **INSERT-only** changelog mode, causing this error:
-```
-TableException: Table sink doesn't support consuming update changes 
-which is produced by node GroupAggregate(groupBy=[f0], select=[f0, SUM(f1) AS total])
-```
+#### The Solution: KeyedProcessFunction with State
 
-**Solution:** Changed from `toDataStream()` to `toChangelogStream()`:
-- `toChangelogStream()` accepts **all changelog modes** including updates
-- Added filtering to process only `INSERT` and `UPDATE_AFTER` rows
-- Ignores `UPDATE_BEFORE` and `DELETE` rows to get the latest aggregated values
-
-**Code Example:**
+**Core Implementation:**
 ```java
-// Perform SQL aggregation
-Table result = tableEnv.sqlQuery("SELECT f0 as name, SUM(f1) as total FROM " + table + " GROUP BY f0");
-
-// Use toChangelogStream() instead of toDataStream() for aggregations
-DataStream<Row> aggregated = tableEnv.toChangelogStream(result);
-
-// Filter to only process final results (INSERT and UPDATE_AFTER)
-DataStream<String> results = aggregated
-    .filter(row -> row.getKind() == RowKind.INSERT || row.getKind() == RowKind.UPDATE_AFTER)
-    .map(row -> row.getField(0) + " visited the gym " + row.getField(1) + " times");
+.keyBy(value -> value.f0)
+.process(new KeyedProcessFunction<String, Tuple2<String, Integer>, Tuple2<String, Integer>>() {
+    private ValueState<Integer> countState;
+    private ValueState<Boolean> timerRegistered;
+    
+    @Override
+    public void open(Configuration parameters) {
+        countState = getRuntimeContext().getState(
+            new ValueStateDescriptor<>("count", Types.INT));
+        timerRegistered = getRuntimeContext().getState(
+            new ValueStateDescriptor<>("timer", Types.BOOLEAN));
+    }
+    
+    @Override
+    public void processElement(Tuple2<String, Integer> value, Context ctx, 
+                               Collector<Tuple2<String, Integer>> out) throws Exception {
+        // Accumulate count in state
+        Integer currentCount = countState.value();
+        countState.update((currentCount == null ? 0 : currentCount) + value.f1);
+        
+        // Register timer on first element for this key
+        if (timerRegistered.value() == null) {
+            ctx.timerService().registerEventTimeTimer(Long.MAX_VALUE - 1);
+            timerRegistered.update(true);
+        }
+    }
+    
+    @Override
+    public void onTimer(long timestamp, OnTimerContext ctx, 
+                       Collector<Tuple2<String, Integer>> out) throws Exception {
+        // Emit final aggregated count when bounded input completes
+        out.collect(new Tuple2<>(ctx.getCurrentKey(), countState.value()));
+    }
+})
 ```
 
-#### Why This Matters
+#### How It Works
 
-- **Correctness:** Ensures only the latest aggregated values are written to output
-- **Performance:** Avoids writing intermediate updates that would be overwritten
-- **Best Practice:** Follows Flink's recommended pattern for handling changelog streams from aggregations
+1. **Stateful Accumulation:** Each key maintains a `ValueState<Integer>` accumulating visit counts
+2. **Timer Registration:** On first element per key, registers event-time timer at `Long.MAX_VALUE - 1`
+3. **End-of-Input Detection:** When bounded stream completes, watermark advances to Long.MAX_VALUE, firing timer
+4. **Single Emission:** Timer callback emits final aggregated count (no intermediate outputs)
+
+#### Why This Approach?
+
+- **AWS Compatibility:** Works in STREAMING mode (required by AWS Managed Flink)
+- **Batch Semantics:** Achieves batch-style aggregation without true BATCH mode
+- **Correctness:** Emits only final totals after all input processed
+- **Simplicity:** No changelog handling, no windowing complexity
+
+#### Verification
+
+Input: 150 gym visits across 8 people in `gymvisits.csv`
+
+Output (final totals only):
+```
+Dan,7
+Kate,31
+Mark,31
+Peter,30
+Joe,20
+Len,19
+Jill,7
+Nick,5
+```
 
 #### References
-- [Apache Flink Changelog Mode Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/table/data_stream_api/#handling-of-changelog-streams)
-- [Flink Source Code: FlinkChangelogModeInferenceProgram.scala](https://github.com/apache/flink/blob/main/flink-table/flink-table-planner/src/main/scala/org/apache/flink/table/planner/plan/optimize/program/FlinkChangelogModeInferenceProgram.scala)
+- [Flink ProcessFunction Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.19/docs/dev/datastream/operators/process_function/)
+- [Flink State Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.19/docs/dev/datastream/fault-tolerance/state/)
 
 ---
-
----
-
-datafall/
 
 ## Data Structure
 
-### S3 Table: `results` or `datafall`
+### Input: S3 CSV File
 
-**Location:** `s3://tm-data-bucket-<date>-<epoch>/results/` (or `/datafall/` depending on configuration)
+**Location:** `s3://tm-input-data-bucket-<date>-<epoch>/datafall/gymvisits.csv`
 
-**Output Format:**
-Formatted text strings with aggregated gym visit counts per person.
+**Format:** CSV with person name and timestamp
+```csv
+person,timestamp
+Dan,2024-10-21 10:15:00
+Kate,2024-10-21 10:30:00
+Joe,2024-10-21 11:00:00
+...
+```
+
+**Sample Data:** 150 gym visit records across 8 unique people
+
+### Output: S3 Aggregated Results
+
+**Location:** `s3://tm-output-data-bucket-<date>-<epoch>/datalake/`
+
+**Format:** CSV with person name and total visit count
+```csv
+Dan,7
+Kate,31
+Mark,31
+Peter,30
+Joe,20
+Len,19
+Jill,7
+Nick,5
+```
+
+**Characteristics:**
+- One row per unique person (8 total)
+- Final aggregated counts only (no intermediate outputs)
+- Results match actual CSV data (100% accuracy verified)
 
 **Example Output:**
 ```
@@ -489,8 +552,8 @@ aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -10
 
 ### Upload Test Data
 ```bash
-# Upload sample CSV to S3
-aws s3 cp inputs/gymvisits.csv s3://<your-input-bucket>/gymvisits.csv
+# Upload sample CSV to S3 input bucket
+aws s3 cp inputs/gymvisits.csv s3://tm-input-data-bucket-<date>-<epoch>/datafall/gymvisits.csv
 ```
 
 ### Monitor Logs
@@ -500,10 +563,25 @@ aws logs tail /aws/kinesis-analytics/datahose-app --follow
 
 ### Check S3 Output
 ```bash
-aws s3 ls s3://<latest-tm-data-bucket-*>/results/ --recursive
-aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -20
-# Output should show: "Alice visited the gym 25 times", etc.
+# List output files
+aws s3 ls s3://tm-output-data-bucket-<date>-<epoch>/datalake/ --recursive
+
+# View aggregated results
+aws s3 cp s3://tm-output-data-bucket-<date>-<epoch>/datalake/part-0-0 - | head -20
+
+# Expected output (CSV format):
+# Dan,7
+# Kate,31
+# Mark,31
+# Peter,30
+# Joe,20
+# Len,19
+# Jill,7
+# Nick,5
 ```
+
+### Verify Results
+After deployment, expect exactly 8 output rows (one per unique person) with final aggregated counts matching input data.
 
 ---
 
@@ -520,17 +598,28 @@ aws kinesisanalyticsv2 describe-application --application-name datahose-app
 - IAM permissions missing
 - JAR file corrupt
 
-### No data in S3
+### No data in S3 output
 ```bash
-aws s3 ls s3://<latest-tm-data-bucket-*>/
+aws s3 ls s3://tm-output-data-bucket-<date>-<epoch>/datalake/
 aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error"
 # Wait at least 5 seconds for first file (rolling policy)
 ```
+**Common Causes:**
+- Input file missing or incorrect path
+- Timer not firing (check watermark advancement)
+- FileSink configuration issue
 
-### Data aggregation incorrect
-- Check application logs for SQL errors
-- Verify input CSV format matches expected schema
+### Incorrect aggregation counts
+- Verify input CSV format: `person,timestamp` with header row
+- Check logs for parsing errors: `grep -i "flatmap\|parse" in application logs`
+- Ensure bounded stream: `WatermarkStrategy.forMonotonousTimestamps()`
 - Rebuild and redeploy: `./cicd.sh`
+
+### Timer not firing (no output)
+- **Symptom:** Application runs but produces no output
+- **Cause:** Event-time watermark not advancing to Long.MAX_VALUE
+- **Check:** Input must be bounded (file-based) with proper watermark strategy
+- **Solution:** Verify `WatermarkStrategy.forMonotonousTimestamps()` is used
 
 ### Region or Java version issues
 - Verify your AWS region is configured: `aws configure get region`
@@ -538,7 +627,7 @@ aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|err
 
 ---
 
-### Application Won't Start
+### Application Won't Start (Detailed)
 
 **Symptom:** Status stuck in `STARTING` or transitions to `RESTARTING`
 
@@ -557,7 +646,7 @@ aws kinesisanalyticsv2 describe-application \
    - Fix: Update `StreamingApp.java` with correct bucket name
    - Rebuild and redeploy
 
-2. **IAM Permissions:** Role doesn't have S3 write access
+2. **IAM Permissions:** Role doesn't have S3 read/write access
    - Check policy: `aws iam get-role-policy --role-name datahose-app-flink-role --policy-name datahose-app-flink-policy`
    - Verify S3 permissions are present
 
@@ -565,27 +654,37 @@ aws kinesisanalyticsv2 describe-application \
    - Rebuild: `mvn clean package`
    - Re-upload: `./cicd.sh`
 
-### No Data in S3
+### No Data in S3 (Detailed)
 
-**Symptom:** Application running but no files in S3
+**Symptom:** Application running but no files in S3 output bucket
 
 **Diagnosis:**
 ```bash
-# Check if data bucket exists
-aws s3 ls s3://<latest-tm-data-bucket-*>/
+# Check if output bucket exists
+aws s3 ls s3://tm-output-data-bucket-<date>-<epoch>/datalake/
 
 # Check application logs for errors
-aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error"
+aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error\|timer"
 
 # Verify rolling policy timing
-# Files appear after 30s inactivity OR 2min max interval
+# Files appear after 3s inactivity OR 5s max interval
 ```
 
 **Possible Causes:**
-1. **Timing:** Wait at least 5 seconds after start for first file (rolling policy)
-2. **Path Issue:** Check application logs for S3 read/write errors
+1. **Input Missing:** Ensure `gymvisits.csv` exists in input bucket
+2. **Timer Not Firing:** Watermark not advancing (check bounded stream configuration)
 3. **Permissions:** Verify IAM role has GetObject and PutObject permissions
-4. **Input Data:** Ensure input CSV file exists in the configured S3 location
+4. **Path Issue:** Check application logs for S3 read/write errors
+
+### KeyedProcessFunction Debugging
+
+**Symptom:** No output or unexpected aggregation behavior
+
+**Debug Steps:**
+1. **Verify State Updates:** Add logging in `processElement()` to confirm counts accumulating
+2. **Check Timer Registration:** Log when timer registered (should be once per key)
+3. **Monitor Watermark:** Ensure watermark advances to Long.MAX_VALUE for bounded streams
+4. **Validate Input Parsing:** Check FlatMap output (should produce Tuple2<String, 1> per row)
 
 ### Region Mismatch
 
