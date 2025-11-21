@@ -11,7 +11,6 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.connector.file.sink.FileSink;
 import org.apache.flink.connector.file.src.FileSource;
@@ -47,7 +46,7 @@ public class StreamingApp {
     public static final String TABLE = "table";
     public static final String DEFAULT_INPUT_TABLE = "datafall";
     public static final String DEFAULT_TARGET_TABLE = "datalake";
-    
+
     public static void main(String[] args) throws Exception {
 
         LOG.info("Analyzing a file - reading from S3 and writing to S3");
@@ -104,68 +103,17 @@ public class StreamingApp {
 
         // Parse the data to obtain a Tuple of (name,1) for each record
         DataStream<Tuple2<String, Integer>> parsedData = sourceRecords
-                .flatMap(new FlatMapFunction<String, Tuple2<String, Integer>>() {
-                    @Override
-                    public void flatMap(String record, Collector<Tuple2<String, Integer>> out) {
-                        String[] elements = record.trim().split(",");
-                        if (elements.length == 2) {
-                            // Emit (name,1) for each record
-                            out.collect(new Tuple2<>(elements[0].trim(), 1));
-                        }
-                    }
-                });
+                .flatMap(new Tokenizer());
         LOG.info("Parsed Data: {}", parsedData);
 
         // Use KeyedProcessFunction to accumulate counts and emit only at end
         DataStream<Tuple2<String, Integer>> visitsPerPerson = parsedData
                 .keyBy(value -> value.f0)
-                .process(new KeyedProcessFunction<String, Tuple2<String, Integer>, Tuple2<String, Integer>>() {
-                    private ValueState<Integer> countState;
-                    private ValueState<Boolean> timerRegistered;
-
-                    @Override
-                    public void open(Configuration parameters) {
-                        countState = getRuntimeContext().getState(
-                            new ValueStateDescriptor<>("count", Types.INT));
-                        timerRegistered = getRuntimeContext().getState(
-                            new ValueStateDescriptor<>("timerRegistered", Types.BOOLEAN));
-                    }
-
-                    @Override
-                    public void processElement(
-                            Tuple2<String, Integer> value,
-                            Context ctx,
-                            Collector<Tuple2<String, Integer>> out) throws Exception {
-                        // Accumulate count
-                        Integer currentCount = countState.value();
-                        countState.update((currentCount == null ? 0 : currentCount) + value.f1);
-                        
-                        // Register timer for max watermark (fires at end of bounded input)
-                        if (timerRegistered.value() == null) {
-                            ctx.timerService().registerEventTimeTimer(Long.MAX_VALUE - 1);
-                            timerRegistered.update(true);
-                        }
-                    }
-
-                    @Override
-                    public void onTimer(long timestamp, OnTimerContext ctx, 
-                                       Collector<Tuple2<String, Integer>> out) throws Exception {
-                        // Emit final count when watermark reaches max
-                        Integer finalCount = countState.value();
-                        if (finalCount != null) {
-                            out.collect(new Tuple2<>(ctx.getCurrentKey(), finalCount));
-                        }
-                    }
-                })
+                .process(new VisitCounter())
                 .returns(Types.TUPLE(Types.STRING, Types.INT));
 
         // Transform to output format
-        DataStream<String> results = visitsPerPerson.map(new MapFunction<Tuple2<String, Integer>, String>() {
-            @Override
-            public String map(Tuple2<String, Integer> value) {
-                return value.f0 + " visited the gym " + value.f1 + " times";
-            }
-        });
+        DataStream<String> results = visitsPerPerson.map(new OutputFormatter());
 
         // Your existing FileSink code
         FileSink<String> s3Sink = FileSink
@@ -179,6 +127,74 @@ public class StreamingApp {
 
         results.sinkTo(s3Sink);
         env.execute("S3 to S3 - Analytical Use Case");
+    }
+
+    /**
+     * Tokenizer to parse CSV lines into (Name, 1) tuples.
+     */
+    public static class Tokenizer implements FlatMapFunction<String, Tuple2<String, Integer>> {
+        @Override
+        public void flatMap(String record, Collector<Tuple2<String, Integer>> out) {
+            String[] elements = record.trim().split(",");
+            if (elements.length == 2) {
+                // Emit (name,1) for each record
+                out.collect(new Tuple2<>(elements[0].trim(), 1));
+            }
+        }
+    }
+
+    /**
+     * Stateful process function to accumulate counts and emit only when input
+     * completes.
+     */
+    public static class VisitCounter
+            extends KeyedProcessFunction<String, Tuple2<String, Integer>, Tuple2<String, Integer>> {
+        private ValueState<Integer> countState;
+        private ValueState<Boolean> timerRegistered;
+
+        @Override
+        public void open(Configuration parameters) {
+            countState = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("count", Types.INT));
+            timerRegistered = getRuntimeContext().getState(
+                    new ValueStateDescriptor<>("timerRegistered", Types.BOOLEAN));
+        }
+
+        @Override
+        public void processElement(
+                Tuple2<String, Integer> value,
+                Context ctx,
+                Collector<Tuple2<String, Integer>> out) throws Exception {
+            // Accumulate count
+            Integer currentCount = countState.value();
+            countState.update((currentCount == null ? 0 : currentCount) + value.f1);
+
+            // Register timer for max watermark (fires at end of bounded input)
+            if (timerRegistered.value() == null) {
+                ctx.timerService().registerEventTimeTimer(Long.MAX_VALUE - 1);
+                timerRegistered.update(true);
+            }
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx,
+                Collector<Tuple2<String, Integer>> out) throws Exception {
+            // Emit final count when watermark reaches max
+            Integer finalCount = countState.value();
+            if (finalCount != null) {
+                out.collect(new Tuple2<>(ctx.getCurrentKey(), finalCount));
+            }
+        }
+    }
+
+    /**
+     * Formats the output string.
+     */
+    public static class OutputFormatter implements MapFunction<Tuple2<String, Integer>, String> {
+        @Override
+        public String map(Tuple2<String, Integer> value) {
+            return value.f0 + " visited the gym " + value.f1 + " times";
+        }
     }
 
 }
