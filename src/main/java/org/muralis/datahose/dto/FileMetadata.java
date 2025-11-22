@@ -7,13 +7,17 @@ import lombok.ToString;
 
 import java.io.Serializable;
 
+/**
+ * Generic file processing metadata.
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @ToString
-public class Visit implements Serializable {
+public class FileMetadata implements Serializable {
     private static final long serialVersionUID = 1L;
 
-    private String name;
-    private String date;
+    private String fileName;
+    private String type;
+    private String format;
 }

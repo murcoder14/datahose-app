@@ -1,0 +1,23 @@
+{
+  "namespace": "org.muralis.datahose.avro",
+  "type": "record",
+  "name": "FileMetadata",
+  "doc": "File processing metadata record",
+  "fields": [
+    {
+      "name": "fileName",
+      "type": "string",
+      "doc": "Name of the file"
+    },
+    {
+      "name": "type",
+      "type": "string",
+      "doc": "Type of file (e.g., quarterly, annual, monthly)"
+    },
+    {
+      "name": "format",
+      "type": "string",
+      "doc": "File format (e.g., PDF, CSV, JSON)"
+    }
+  ]
+}

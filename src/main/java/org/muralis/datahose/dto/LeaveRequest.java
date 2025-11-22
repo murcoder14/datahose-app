@@ -7,13 +7,19 @@ import lombok.ToString;
 
 import java.io.Serializable;
 
+/**
+ * Leave of Absence request.
+ */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @ToString
-public class Visit implements Serializable {
+public class LeaveRequest implements Serializable {
     private static final long serialVersionUID = 1L;
 
-    private String name;
-    private String date;
+    private String employeeId;
+    private String leaveType;
+    private String startDate;
+    private String endDate;
+    private String approvalStatus;
 }

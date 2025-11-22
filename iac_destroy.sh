@@ -35,13 +35,14 @@ log_error() {
 APP_NAME="datahose-app"
 # Auto-detect latest dynamic S3 buckets by prefix and creation date
 # Load bucket names from environment or config file
-if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$INPUT_DATA_BUCKET" ] || [ -z "$OUTPUT_DATA_BUCKET" ]; then
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$VISITS_INPUT_BUCKET" ] || [ -z "$VISITS_OUTPUT_BUCKET" ] || [ -z "$CLAIMS_OUTPUT_BUCKET" ] || [ -z "$LEAVEREQUESTS_OUTPUT_BUCKET" ] || [ -z "$DEFAULT_OUTPUT_BUCKET" ]; then
     if [ -f "/tmp/flink-config.env" ]; then
         source /tmp/flink-config.env
     fi
 fi
-if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$INPUT_DATA_BUCKET" ] || [ -z "$OUTPUT_DATA_BUCKET" ]; then
-    echo -e "${RED}[ERROR]${NC} STREAMING_APP_BUCKET, INPUT_DATA_BUCKET, and/or OUTPUT_DATA_BUCKET not set. Please export them or source /tmp/flink-config.env from your deployment before running this script."
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$VISITS_INPUT_BUCKET" ] || [ -z "$VISITS_OUTPUT_BUCKET" ] || [ -z "$CLAIMS_OUTPUT_BUCKET" ] || [ -z "$LEAVEREQUESTS_OUTPUT_BUCKET" ] || [ -z "$DEFAULT_OUTPUT_BUCKET" ]; then
+    echo -e "${RED}[ERROR]${NC} Required bucket variables not set. Please export them or source /tmp/flink-config.env from your deployment before running this script."
+    echo "Required: STREAMING_APP_BUCKET, VISITS_INPUT_BUCKET, VISITS_OUTPUT_BUCKET, CLAIMS_OUTPUT_BUCKET, LEAVEREQUESTS_OUTPUT_BUCKET, DEFAULT_OUTPUT_BUCKET"
     exit 1
 fi
 # Get region from AWS CLI default profile configuration
@@ -54,6 +55,7 @@ IAM_ROLE_NAME="${APP_NAME}-flink-role"
 IAM_POLICY_NAME="${APP_NAME}-flink-policy"
 USER_POLICY_NAME="${APP_NAME}-s3-upload-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
+KINESIS_STREAM_NAME="${APP_NAME}-stream"
 
 log_warn "=============================================="
 log_warn "WARNING: This will destroy all infrastructure!"
@@ -61,8 +63,12 @@ log_warn "=============================================="
 echo ""
 log_warn "Resources to be deleted:"
 echo "  - S3 Bucket: ${STREAMING_APP_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${INPUT_DATA_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${OUTPUT_DATA_BUCKET} (and all contents)"
+echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
+echo "  - S3 Bucket: ${VISITS_INPUT_BUCKET} (and all contents)"
+echo "  - S3 Bucket: ${VISITS_OUTPUT_BUCKET} (and all contents)"
+echo "  - S3 Bucket: ${CLAIMS_OUTPUT_BUCKET} (and all contents)"
+echo "  - S3 Bucket: ${LEAVEREQUESTS_OUTPUT_BUCKET} (and all contents)"
+echo "  - S3 Bucket: ${DEFAULT_OUTPUT_BUCKET} (and all contents)"
 echo "  - IAM Role: ${IAM_ROLE_NAME}"
 echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
 echo "  - IAM Policy (S3 Upload): ${USER_POLICY_NAME}"
@@ -230,11 +236,23 @@ delete_s3_bucket() {
 
 # Delete all S3 buckets
 delete_s3_bucket "${STREAMING_APP_BUCKET}"
-delete_s3_bucket "${INPUT_DATA_BUCKET}"
-delete_s3_bucket "${OUTPUT_DATA_BUCKET}"
+delete_s3_bucket "${VISITS_INPUT_BUCKET}"
+delete_s3_bucket "${VISITS_OUTPUT_BUCKET}"
+delete_s3_bucket "${CLAIMS_OUTPUT_BUCKET}"
+delete_s3_bucket "${LEAVEREQUESTS_OUTPUT_BUCKET}"
+delete_s3_bucket "${DEFAULT_OUTPUT_BUCKET}"
 
-# Kinesis Data Stream is no longer used in S3-to-S3 architecture
-log_info "Skipping Kinesis Data Stream deletion (S3-to-S3 architecture)..."
+# Delete Kinesis Data Stream
+log_info "Deleting Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
+if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
+    aws kinesis delete-stream \
+        --stream-name "${KINESIS_STREAM_NAME}" \
+        --region "${REGION}" \
+        --enforce-consumer-deletion 2>&1
+    log_info "Kinesis Data Stream deletion initiated. It may take a few minutes to complete."
+else
+    log_warn "Kinesis Data Stream ${KINESIS_STREAM_NAME} not found. Skipping..."
+fi
 
 # Detach user policy from sunny0524 and delete user policy
 USER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${USER_POLICY_NAME}"
@@ -325,7 +343,8 @@ log_info "Infrastructure Destruction Complete!"
 log_info "=============================================="
 echo ""
 log_info "All resources have been removed:"
-echo "  ✓ S3 Buckets deleted (Application JAR, Input Data, Output Data)"
+echo "  ✓ S3 Buckets deleted (Application JAR, Visits Input, Visits Output, Claims Output, Leave Requests Output, Default Output)"
+echo "  ✓ Kinesis Data Stream deleted"
 echo "  ✓ IAM Role and Policies deleted"
 echo "  ✓ CloudWatch Log Group deleted"
 echo "  ✓ Flink Application deleted"

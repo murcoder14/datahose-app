@@ -39,11 +39,14 @@ fi
 # Configuration
 APP_NAME="${APP_NAME:-datahose-app}"
 STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
-INPUT_DATA_BUCKET="${INPUT_DATA_BUCKET}"
-OUTPUT_DATA_BUCKET="${OUTPUT_DATA_BUCKET}"
-INPUT_DATA_BUCKET_TABLE_NAME="${INPUT_DATA_BUCKET_TABLE_NAME:-datafall}"
-OUTPUT_DATA_BUCKET_TABLE_NAME="${OUTPUT_DATA_BUCKET_TABLE_NAME:-datalake}"
+VISITS_INPUT_BUCKET="${VISITS_INPUT_BUCKET}"
+VISITS_OUTPUT_BUCKET="${VISITS_OUTPUT_BUCKET}"
+CLAIMS_OUTPUT_BUCKET="${CLAIMS_OUTPUT_BUCKET}"
+LEAVEREQUESTS_OUTPUT_BUCKET="${LEAVEREQUESTS_OUTPUT_BUCKET}"
+DEFAULT_OUTPUT_BUCKET="${DEFAULT_OUTPUT_BUCKET}"
+VISITS_INPUT_KEY="${VISITS_INPUT_KEY:-filefall/gymvisits.csv}"
 LOG_GROUP="${LOG_GROUP:-/aws/kinesis-analytics/${APP_NAME}}"
+KINESIS_STREAM_NAME="${KINESIS_STREAM_NAME}"
 
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
@@ -64,15 +67,19 @@ if [ -z "${FLINK_ROLE_ARN}" ]; then
     exit 1
 fi
 
-if [ -z "${INPUT_DATA_BUCKET}" ]; then
-    log_error "INPUT_DATA_BUCKET is not set. Please run iac_create.sh first and source the configuration."
-    log_error "Or set it manually: export INPUT_DATA_BUCKET=<your-input-bucket>"
+if [ -z "${VISITS_INPUT_BUCKET}" ]; then
+    log_error "VISITS_INPUT_BUCKET is not set. Please run iac_create.sh first and source the configuration."
+    log_error "Or set it manually: export VISITS_INPUT_BUCKET=<your-input-bucket>"
     exit 1
 fi
 
-if [ -z "${OUTPUT_DATA_BUCKET}" ]; then
-    log_error "OUTPUT_DATA_BUCKET is not set. Please run iac_create.sh first and source the configuration."
-    log_error "Or set it manually: export OUTPUT_DATA_BUCKET=<your-output-bucket>"
+if [ -z "${VISITS_OUTPUT_BUCKET}" ] || [ -z "${CLAIMS_OUTPUT_BUCKET}" ] || [ -z "${LEAVEREQUESTS_OUTPUT_BUCKET}" ] || [ -z "${DEFAULT_OUTPUT_BUCKET}" ]; then
+    log_error "One or more output buckets are not set. Please run iac_create.sh first and source the configuration."
+    exit 1
+fi
+
+if [ -z "${KINESIS_STREAM_NAME}" ]; then
+    log_error "KINESIS_STREAM_NAME is not set. Please set it manually: export KINESIS_STREAM_NAME=<your-stream-name>"
     exit 1
 fi
 
@@ -83,10 +90,13 @@ echo ""
 log_info "Configuration:"
 echo "  - Application Name: ${APP_NAME}"
 echo "  - Application Bucket: ${STREAMING_APP_BUCKET}"
-echo "  - Input Data Bucket: ${INPUT_DATA_BUCKET}"
-echo "  - Input Table: ${INPUT_DATA_BUCKET_TABLE_NAME}"
-echo "  - Output Data Bucket: ${OUTPUT_DATA_BUCKET}"
-echo "  - Output Table: ${OUTPUT_DATA_BUCKET_TABLE_NAME}"
+echo "  - Visits Input Bucket: ${VISITS_INPUT_BUCKET}"
+echo "  - Visits Input Key: ${VISITS_INPUT_KEY}"
+echo "  - Visits Output Bucket: ${VISITS_OUTPUT_BUCKET}"
+echo "  - Claims Output Bucket: ${CLAIMS_OUTPUT_BUCKET}"
+echo "  - Leave Requests Output Bucket: ${LEAVEREQUESTS_OUTPUT_BUCKET}"
+echo "  - Default Output Bucket: ${DEFAULT_OUTPUT_BUCKET}"
+echo "  - Kinesis Stream: ${KINESIS_STREAM_NAME}"
 echo "  - CloudWatch Logs: ${LOG_GROUP}"
 echo "  - Region: ${REGION}"
 echo "  - IAM Role ARN: ${FLINK_ROLE_ARN}"
@@ -183,6 +193,47 @@ log_step "Step 3: Creating/Updating Flink application..."
 if aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" --region "${REGION}" &> /dev/null; then
     log_info "Application ${APP_NAME} already exists. Updating..."
     
+    # Check current application status
+    CURRENT_STATUS=$(aws kinesisanalyticsv2 describe-application \
+        --application-name "${APP_NAME}" \
+        --region "${REGION}" \
+        --query 'ApplicationDetail.ApplicationStatus' \
+        --output text)
+    
+    log_info "Current application status: ${CURRENT_STATUS}"
+    
+    # Stop the application if it's running
+    if [ "${CURRENT_STATUS}" == "RUNNING" ] || [ "${CURRENT_STATUS}" == "STARTING" ]; then
+        log_info "Stopping application before update..."
+        aws kinesisanalyticsv2 stop-application \
+            --application-name "${APP_NAME}" \
+            --region "${REGION}" \
+            --force 2>&1 || log_warn "Stop command issued (may already be stopping)"
+        
+        # Wait for application to stop
+        log_info "Waiting for application to stop..."
+        for i in {1..30}; do
+            STOP_STATUS=$(aws kinesisanalyticsv2 describe-application \
+                --application-name "${APP_NAME}" \
+                --region "${REGION}" \
+                --query 'ApplicationDetail.ApplicationStatus' \
+                --output text)
+            
+            if [ "${STOP_STATUS}" == "READY" ]; then
+                log_info "Application stopped successfully."
+                break
+            fi
+            
+            if [ $i -eq 30 ]; then
+                log_error "Timeout waiting for application to stop. Current status: ${STOP_STATUS}"
+                exit 1
+            fi
+            
+            log_info "Current status: ${STOP_STATUS}. Waiting... (${i}/30)"
+            sleep 10
+        done
+    fi
+    
     # Get current application version
     APP_VERSION=$(aws kinesisanalyticsv2 describe-application \
         --application-name "${APP_NAME}" \
@@ -220,21 +271,24 @@ if aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" 
                     {\
                         \"PropertyGroupId\": \"KinesisSource\",\
                         \"PropertyMap\": {\
-                            \"aws.region\": \"${REGION}\"\
+                            \"aws.region\": \"${REGION}\",\
+                            \"stream.arn\": \"arn:aws:kinesis:${REGION}:${ACCOUNT_ID}:stream/${KINESIS_STREAM_NAME}\"\
                         }\
                     },\
                     {\
-                        \"PropertyGroupId\": \"S3Source\",\
+                        \"PropertyGroupId\": \"s3source\",\
                         \"PropertyMap\": {\
-                            \"input-bucket\": \"${INPUT_DATA_BUCKET}\",\
-                            \"table\": \"${INPUT_DATA_BUCKET_TABLE_NAME}\"\
+                            \"visits-input-bucket\": \"${VISITS_INPUT_BUCKET}\",\
+                            \"visits-input-key\": \"${VISITS_INPUT_KEY}\"\
                         }\
                     },\
                     {\
-                        \"PropertyGroupId\": \"S3Sink\",\
+                        \"PropertyGroupId\": \"s3sink\",\
                         \"PropertyMap\": {\
-                            \"output-bucket\": \"${OUTPUT_DATA_BUCKET}\",\
-                            \"table\": \"${OUTPUT_DATA_BUCKET_TABLE_NAME}\"\
+                            \"visits-output-bucket\": \"${VISITS_OUTPUT_BUCKET}\",\
+                            \"claims-output-bucket\": \"${CLAIMS_OUTPUT_BUCKET}\",\
+                            \"leaverequests-output-bucket\": \"${LEAVEREQUESTS_OUTPUT_BUCKET}\",\
+                            \"default-output-bucket\": \"${DEFAULT_OUTPUT_BUCKET}\"\
                         }\
                     }\
                 ]\
@@ -284,21 +338,24 @@ else
                     {\
                         \"PropertyGroupId\": \"KinesisSource\",\
                         \"PropertyMap\": {\
-                            \"aws.region\": \"${REGION}\"\
+                            \"aws.region\": \"${REGION}\",\
+                            \"stream.arn\": \"arn:aws:kinesis:${REGION}:${ACCOUNT_ID}:stream/${KINESIS_STREAM_NAME}\"\
                         }\
                     },\
                     {\
-                        \"PropertyGroupId\": \"S3Source\",\
+                        \"PropertyGroupId\": \"s3source\",\
                         \"PropertyMap\": {\
-                            \"input-bucket\": \"${INPUT_DATA_BUCKET}\",\
-                            \"table\": \"${INPUT_DATA_BUCKET_TABLE_NAME}\"\
+                            \"visits-input-bucket\": \"${VISITS_INPUT_BUCKET}\",\
+                            \"visits-input-key\": \"${VISITS_INPUT_KEY}\"\
                         }\
                     },\
                     {\
-                        \"PropertyGroupId\": \"S3Sink\",\
+                        \"PropertyGroupId\": \"s3sink\",\
                         \"PropertyMap\": {\
-                            \"output-bucket\": \"${OUTPUT_DATA_BUCKET}\",\
-                            \"table\": \"${OUTPUT_DATA_BUCKET_TABLE_NAME}\"\
+                            \"visits-output-bucket\": \"${VISITS_OUTPUT_BUCKET}\",\
+                            \"claims-output-bucket\": \"${CLAIMS_OUTPUT_BUCKET}\",\
+                            \"leaverequests-output-bucket\": \"${LEAVEREQUESTS_OUTPUT_BUCKET}\",\
+                            \"default-output-bucket\": \"${DEFAULT_OUTPUT_BUCKET}\"\
                         }\
                     }\
                 ]\
@@ -433,8 +490,12 @@ echo "  - Region: ${REGION}"
 echo ""
 log_info "Application Resources:"
 echo "  - Application Code: s3://${STREAMING_APP_BUCKET}/${S3_JAR_KEY}"
-echo "  - Data Input: s3://${INPUT_DATA_BUCKET}/${INPUT_DATA_BUCKET_TABLE_NAME}/"
-echo "  - Data Output: s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/"
+echo "  - Kinesis Stream: ${KINESIS_STREAM_NAME}"
+echo "  - Visits Input: s3://${VISITS_INPUT_BUCKET}/${VISITS_INPUT_KEY}"
+echo "  - Visits Output: s3://${VISITS_OUTPUT_BUCKET}/"
+echo "  - Claims Output: s3://${CLAIMS_OUTPUT_BUCKET}/"
+echo "  - Leave Requests Output: s3://${LEAVEREQUESTS_OUTPUT_BUCKET}/"
+echo "  - Default Output: s3://${DEFAULT_OUTPUT_BUCKET}/"
 echo "  - CloudWatch Logs: ${LOG_GROUP}"
 echo ""
 log_info "Monitoring Commands:"
@@ -444,14 +505,26 @@ echo ""
 echo "  - View CloudWatch logs:"
 echo "    aws logs tail ${LOG_GROUP} --follow --region ${REGION}"
 echo ""
-echo "  - List input files in S3:"
-echo "    aws s3 ls s3://${INPUT_DATA_BUCKET}/${INPUT_DATA_BUCKET_TABLE_NAME}/ --recursive --region ${REGION}"
+echo "  - List visits input files:"
+echo "    aws s3 ls s3://${VISITS_INPUT_BUCKET}/ --recursive --region ${REGION}"
 echo ""
-echo "  - List output files in S3:"
-echo "    aws s3 ls s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/ --recursive --region ${REGION}"
+echo "  - List visits output:"
+echo "    aws s3 ls s3://${VISITS_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
 echo ""
-echo "  - Download output files:"
-echo "    aws s3 sync s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_DATA_BUCKET_TABLE_NAME}/ ./output/ --region ${REGION}"
+echo "  - List claims output:"
+echo "    aws s3 ls s3://${CLAIMS_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
+echo ""
+echo "  - List leave requests output:"
+echo "    aws s3 ls s3://${LEAVEREQUESTS_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
+echo ""
+echo "  - List default output:"
+echo "    aws s3 ls s3://${DEFAULT_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
+echo ""
+echo "  - Download all output files:"
+echo "    aws s3 sync s3://${VISITS_OUTPUT_BUCKET}/ ./output/visits/ --region ${REGION}"
+echo "    aws s3 sync s3://${CLAIMS_OUTPUT_BUCKET}/ ./output/claims/ --region ${REGION}"
+echo "    aws s3 sync s3://${LEAVEREQUESTS_OUTPUT_BUCKET}/ ./output/leaverequests/ --region ${REGION}"
+echo "    aws s3 sync s3://${DEFAULT_OUTPUT_BUCKET}/ ./output/default/ --region ${REGION}"
 echo ""
 log_info "To stop the application:"
 echo "  aws kinesisanalyticsv2 stop-application --application-name ${APP_NAME} --region ${REGION}"

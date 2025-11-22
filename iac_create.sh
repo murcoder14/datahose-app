@@ -32,10 +32,15 @@ BUCKET_SUFFIX="${DATE_SUFFIX}-${EPOCH_SUFFIX}"
 
 APP_NAME="datahose-app"
 STREAMING_APP_BUCKET="tm-streaming-app-bucket-${BUCKET_SUFFIX}"
-INPUT_DATA_BUCKET="tm-input-data-bucket-${BUCKET_SUFFIX}"
-OUTPUT_DATA_BUCKET="tm-output-data-bucket-${BUCKET_SUFFIX}"
-INPUT_DATA_BUCKET_TABLE_NAME="datafall"
-OUTPUT_DATA_BUCKET_TABLE_NAME="datalake"
+VISITS_INPUT_BUCKET="tm-visits-input-${BUCKET_SUFFIX}"
+VISITS_OUTPUT_BUCKET="tm-visits-output-${BUCKET_SUFFIX}"
+CLAIMS_OUTPUT_BUCKET="tm-claims-output-${BUCKET_SUFFIX}"
+LEAVEREQUESTS_OUTPUT_BUCKET="tm-leaverequests-output-${BUCKET_SUFFIX}"
+DEFAULT_OUTPUT_BUCKET="tm-output-${BUCKET_SUFFIX}"
+VISITS_INPUT_KEY="filefall/gymvisits.csv"
+KINESIS_STREAM_NAME="${APP_NAME}-stream"
+KINESIS_SHARD_COUNT=1
+
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -85,62 +90,127 @@ else
     log_warn "Bucket ${STREAMING_APP_BUCKET} already exists."
 fi
 
-# Create S3 bucket for input data
-log_info "Creating S3 bucket for input data: ${INPUT_DATA_BUCKET}..."
-if aws s3 ls "s3://${INPUT_DATA_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
+# Create S3 bucket for visits input data
+log_info "Creating S3 bucket for visits input data: ${VISITS_INPUT_BUCKET}..."
+if aws s3 ls "s3://${VISITS_INPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
     aws s3api create-bucket \
-        --bucket "${INPUT_DATA_BUCKET}" \
+        --bucket "${VISITS_INPUT_BUCKET}" \
         --region "${REGION}" \
         --create-bucket-configuration LocationConstraint="${REGION}"
     
     # Enable versioning
     aws s3api put-bucket-versioning \
-        --bucket "${INPUT_DATA_BUCKET}" \
+        --bucket "${VISITS_INPUT_BUCKET}" \
         --versioning-configuration Status=Enabled
     
-    log_info "Bucket ${INPUT_DATA_BUCKET} created successfully."
+    log_info "Bucket ${VISITS_INPUT_BUCKET} created successfully."
 else
-    log_warn "Bucket ${INPUT_DATA_BUCKET} already exists."
+    log_warn "Bucket ${VISITS_INPUT_BUCKET} already exists."
 fi
 
-# Create S3 "table" structure (folder) for input data
-log_info "Creating S3 input table structure: ${INPUT_DATA_BUCKET_TABLE_NAME}..."
+# Create folder structure for input data
+log_info "Creating S3 input folder structure..."
+INPUT_FOLDER=$(dirname "${VISITS_INPUT_KEY}")
 aws s3api put-object \
-    --bucket "${INPUT_DATA_BUCKET}" \
-    --key "${INPUT_DATA_BUCKET_TABLE_NAME}/" \
-    --region "${REGION}" || log_warn "Input table folder may already exist."
+    --bucket "${VISITS_INPUT_BUCKET}" \
+    --key "${INPUT_FOLDER}/" \
+    --region "${REGION}" || log_warn "Input folder may already exist."
 
-log_info "S3 input table ${INPUT_DATA_BUCKET_TABLE_NAME} structure created in bucket ${INPUT_DATA_BUCKET}."
+log_info "S3 input folder ${INPUT_FOLDER} structure created in bucket ${VISITS_INPUT_BUCKET}."
 
-# Create S3 bucket for output data
-log_info "Creating S3 bucket for output data: ${OUTPUT_DATA_BUCKET}..."
-if aws s3 ls "s3://${OUTPUT_DATA_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
+# Create S3 bucket for visits output data
+log_info "Creating S3 bucket for visits output data: ${VISITS_OUTPUT_BUCKET}..."
+if aws s3 ls "s3://${VISITS_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
     aws s3api create-bucket \
-        --bucket "${OUTPUT_DATA_BUCKET}" \
+        --bucket "${VISITS_OUTPUT_BUCKET}" \
         --region "${REGION}" \
         --create-bucket-configuration LocationConstraint="${REGION}"
     
     # Enable versioning
     aws s3api put-bucket-versioning \
-        --bucket "${OUTPUT_DATA_BUCKET}" \
+        --bucket "${VISITS_OUTPUT_BUCKET}" \
         --versioning-configuration Status=Enabled
     
-    log_info "Bucket ${OUTPUT_DATA_BUCKET} created successfully."
+    log_info "Bucket ${VISITS_OUTPUT_BUCKET} created successfully."
 else
-    log_warn "Bucket ${OUTPUT_DATA_BUCKET} already exists."
+    log_warn "Bucket ${VISITS_OUTPUT_BUCKET} already exists."
 fi
 
-# Create S3 "table" structure (folder) for output data
-log_info "Creating S3 output table structure: ${OUTPUT_DATA_BUCKET_TABLE_NAME}..."
-aws s3api put-object \
-    --bucket "${OUTPUT_DATA_BUCKET}" \
-    --key "${OUTPUT_DATA_BUCKET_TABLE_NAME}/" \
-    --region "${REGION}" || log_warn "Output table folder may already exist."
+# Create S3 bucket for claims output data
+log_info "Creating S3 bucket for claims output data: ${CLAIMS_OUTPUT_BUCKET}..."
+if aws s3 ls "s3://${CLAIMS_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
+    aws s3api create-bucket \
+        --bucket "${CLAIMS_OUTPUT_BUCKET}" \
+        --region "${REGION}" \
+        --create-bucket-configuration LocationConstraint="${REGION}"
+    
+    # Enable versioning
+    aws s3api put-bucket-versioning \
+        --bucket "${CLAIMS_OUTPUT_BUCKET}" \
+        --versioning-configuration Status=Enabled
+    
+    log_info "Bucket ${CLAIMS_OUTPUT_BUCKET} created successfully."
+else
+    log_warn "Bucket ${CLAIMS_OUTPUT_BUCKET} already exists."
+fi
 
-log_info "S3 output table ${OUTPUT_DATA_BUCKET_TABLE_NAME} structure created in bucket ${OUTPUT_DATA_BUCKET}."
+# Create S3 bucket for leave requests output data
+log_info "Creating S3 bucket for leave requests output data: ${LEAVEREQUESTS_OUTPUT_BUCKET}..."
+if aws s3 ls "s3://${LEAVEREQUESTS_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
+    aws s3api create-bucket \
+        --bucket "${LEAVEREQUESTS_OUTPUT_BUCKET}" \
+        --region "${REGION}" \
+        --create-bucket-configuration LocationConstraint="${REGION}"
+    
+    # Enable versioning
+    aws s3api put-bucket-versioning \
+        --bucket "${LEAVEREQUESTS_OUTPUT_BUCKET}" \
+        --versioning-configuration Status=Enabled
+    
+    log_info "Bucket ${LEAVEREQUESTS_OUTPUT_BUCKET} created successfully."
+else
+    log_warn "Bucket ${LEAVEREQUESTS_OUTPUT_BUCKET} already exists."
+fi
 
-# Kinesis Data Stream is no longer needed for S3-to-S3 architecture
-log_info "Skipping Kinesis Data Stream creation (S3-to-S3 architecture)..."
+# Create S3 bucket for default output data (unknown messages)
+log_info "Creating S3 bucket for default output data: ${DEFAULT_OUTPUT_BUCKET}..."
+if aws s3 ls "s3://${DEFAULT_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
+    aws s3api create-bucket \
+        --bucket "${DEFAULT_OUTPUT_BUCKET}" \
+        --region "${REGION}" \
+        --create-bucket-configuration LocationConstraint="${REGION}"
+    
+    # Enable versioning
+    aws s3api put-bucket-versioning \
+        --bucket "${DEFAULT_OUTPUT_BUCKET}" \
+        --versioning-configuration Status=Enabled
+    
+    log_info "Bucket ${DEFAULT_OUTPUT_BUCKET} created successfully."
+else
+    log_warn "Bucket ${DEFAULT_OUTPUT_BUCKET} already exists."
+fi
+
+# Create Kinesis Data Stream
+log_info "Creating Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
+if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
+    log_warn "Kinesis Data Stream ${KINESIS_STREAM_NAME} already exists."
+    STREAM_ARN=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamARN' --output text)
+    log_info "Stream ARN: ${STREAM_ARN}"
+else
+    aws kinesis create-stream \
+        --stream-name "${KINESIS_STREAM_NAME}" \
+        --shard-count "${KINESIS_SHARD_COUNT}" \
+        --region "${REGION}"
+    
+    log_info "Waiting for Kinesis Data Stream to become active..."
+    aws kinesis wait stream-exists \
+        --stream-name "${KINESIS_STREAM_NAME}" \
+        --region "${REGION}"
+    
+    STREAM_ARN=$(aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" --query 'StreamDescription.StreamARN' --output text)
+    log_info "Kinesis Data Stream created successfully."
+    log_info "Stream ARN: ${STREAM_ARN}"
+fi
 
 # Create CloudWatch Log Group
 log_info "Creating CloudWatch Log Group: ${LOG_GROUP_NAME}..."
@@ -228,7 +298,7 @@ cat > /tmp/flink-policy.json <<EOF
       ]
     },
     {
-      "Sid": "ReadFromInputDataBucket",
+      "Sid": "ReadFromVisitsInputBucket",
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
@@ -237,12 +307,12 @@ cat > /tmp/flink-policy.json <<EOF
         "s3:GetBucketLocation"
       ],
       "Resource": [
-        "arn:aws:s3:::${INPUT_DATA_BUCKET}",
-        "arn:aws:s3:::${INPUT_DATA_BUCKET}/*"
+        "arn:aws:s3:::${VISITS_INPUT_BUCKET}",
+        "arn:aws:s3:::${VISITS_INPUT_BUCKET}/*"
       ]
     },
     {
-      "Sid": "WriteToOutputDataBucket",
+      "Sid": "WriteToVisitsOutputBucket",
       "Effect": "Allow",
       "Action": [
         "s3:PutObject",
@@ -253,9 +323,70 @@ cat > /tmp/flink-policy.json <<EOF
         "s3:GetBucketLocation"
       ],
       "Resource": [
-        "arn:aws:s3:::${OUTPUT_DATA_BUCKET}",
-        "arn:aws:s3:::${OUTPUT_DATA_BUCKET}/*"
+        "arn:aws:s3:::${VISITS_OUTPUT_BUCKET}",
+        "arn:aws:s3:::${VISITS_OUTPUT_BUCKET}/*"
       ]
+    },
+    {
+      "Sid": "WriteToClaimsOutputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${CLAIMS_OUTPUT_BUCKET}",
+        "arn:aws:s3:::${CLAIMS_OUTPUT_BUCKET}/*"
+      ]
+    },
+    {
+      "Sid": "WriteToLeaveRequestsOutputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${LEAVEREQUESTS_OUTPUT_BUCKET}",
+        "arn:aws:s3:::${LEAVEREQUESTS_OUTPUT_BUCKET}/*"
+      ]
+    },
+    {
+      "Sid": "WriteToDefaultOutputBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${DEFAULT_OUTPUT_BUCKET}",
+        "arn:aws:s3:::${DEFAULT_OUTPUT_BUCKET}/*"
+      ]
+    },
+    {
+      "Sid": "KinesisStreamAccess",
+      "Effect": "Allow",
+      "Action": [
+        "kinesis:DescribeStream",
+        "kinesis:GetShardIterator",
+        "kinesis:GetRecords",
+        "kinesis:ListShards",
+        "kinesis:DescribeStreamSummary",
+        "kinesis:RegisterStreamConsumer"
+      ],
+      "Resource": "arn:aws:kinesis:${REGION}:${ACCOUNT_ID}:stream/${KINESIS_STREAM_NAME}"
     },
     {
       "Sid": "CloudWatchLogsAccess",
@@ -342,7 +473,7 @@ cat > /tmp/s3-upload-policy.json <<EOF
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "UploadToInputDataBucket",
+      "Sid": "UploadToVisitsInputBucket",
       "Effect": "Allow",
       "Action": [
         "s3:PutObject",
@@ -352,8 +483,8 @@ cat > /tmp/s3-upload-policy.json <<EOF
         "s3:GetBucketLocation"
       ],
       "Resource": [
-        "arn:aws:s3:::${INPUT_DATA_BUCKET}",
-        "arn:aws:s3:::${INPUT_DATA_BUCKET}/*"
+        "arn:aws:s3:::${VISITS_INPUT_BUCKET}",
+        "arn:aws:s3:::${VISITS_INPUT_BUCKET}/*"
       ]
     }
   ]
@@ -380,7 +511,7 @@ else
     USER_POLICY_ARN=$(aws iam create-policy \
         --policy-name "${USER_POLICY_NAME}" \
         --policy-document file:///tmp/s3-upload-policy.json \
-        --description "Policy for user sunny0524 to upload files to S3 input bucket ${INPUT_DATA_BUCKET}" \
+        --description "Policy for user sunny0524 to upload files to S3 input bucket ${VISITS_INPUT_BUCKET}" \
         --query 'Policy.Arn' \
         --output text)
     log_info "User policy created successfully: ${USER_POLICY_ARN}"
@@ -408,10 +539,13 @@ log_info "=============================================="
 echo ""
 log_info "Resources Created:"
 echo "  - S3 Bucket (Application JAR): ${STREAMING_APP_BUCKET}"
-echo "  - S3 Bucket (Input Data): ${INPUT_DATA_BUCKET}"
-echo "  - S3 Input Table: ${INPUT_DATA_BUCKET_TABLE_NAME}"
-echo "  - S3 Bucket (Output Data): ${OUTPUT_DATA_BUCKET}"
-echo "  - S3 Output Table: ${OUTPUT_DATA_BUCKET_TABLE_NAME}"
+echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
+echo "  - S3 Bucket (Visits Input): ${VISITS_INPUT_BUCKET}"
+echo "  - S3 Bucket (Visits Output): ${VISITS_OUTPUT_BUCKET}"
+echo "  - S3 Bucket (Claims Output): ${CLAIMS_OUTPUT_BUCKET}"
+echo "  - S3 Bucket (Leave Requests Output): ${LEAVEREQUESTS_OUTPUT_BUCKET}"
+echo "  - S3 Bucket (Default Output): ${DEFAULT_OUTPUT_BUCKET}"
+echo "  - Visits Input Key: ${VISITS_INPUT_KEY}"
 echo "  - IAM Role (Flink): ${IAM_ROLE_NAME}"
 echo "  - IAM Role ARN: ${ROLE_ARN}"
 echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
@@ -424,10 +558,13 @@ echo ""
 log_info "Save these values for use in cicd.sh and test.sh:"
 echo "export FLINK_ROLE_ARN=\"${ROLE_ARN}\""
 echo "export STREAMING_APP_BUCKET=\"${STREAMING_APP_BUCKET}\""
-echo "export INPUT_DATA_BUCKET=\"${INPUT_DATA_BUCKET}\""
-echo "export OUTPUT_DATA_BUCKET=\"${OUTPUT_DATA_BUCKET}\""
-echo "export INPUT_DATA_BUCKET_TABLE_NAME=\"${INPUT_DATA_BUCKET_TABLE_NAME}\""
-echo "export OUTPUT_DATA_BUCKET_TABLE_NAME=\"${OUTPUT_DATA_BUCKET_TABLE_NAME}\""
+echo "export KINESIS_STREAM_NAME=\"${KINESIS_STREAM_NAME}\""
+echo "export VISITS_INPUT_BUCKET=\"${VISITS_INPUT_BUCKET}\""
+echo "export VISITS_OUTPUT_BUCKET=\"${VISITS_OUTPUT_BUCKET}\""
+echo "export CLAIMS_OUTPUT_BUCKET=\"${CLAIMS_OUTPUT_BUCKET}\""
+echo "export LEAVEREQUESTS_OUTPUT_BUCKET=\"${LEAVEREQUESTS_OUTPUT_BUCKET}\""
+echo "export DEFAULT_OUTPUT_BUCKET=\"${DEFAULT_OUTPUT_BUCKET}\""
+echo "export VISITS_INPUT_KEY=\"${VISITS_INPUT_KEY}\""
 echo "export LOG_GROUP=\"${LOG_GROUP_NAME}\""
 echo "export LOG_STREAM=\"${LOG_STREAM_NAME}\""
 echo "export BUCKET_SUFFIX=\"${BUCKET_SUFFIX}\""
@@ -438,10 +575,13 @@ echo ""
 cat > /tmp/flink-config.env <<EOF
 export FLINK_ROLE_ARN="${ROLE_ARN}"
 export STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
-export INPUT_DATA_BUCKET="${INPUT_DATA_BUCKET}"
-export OUTPUT_DATA_BUCKET="${OUTPUT_DATA_BUCKET}"
-export INPUT_DATA_BUCKET_TABLE_NAME="${INPUT_DATA_BUCKET_TABLE_NAME}"
-export OUTPUT_DATA_BUCKET_TABLE_NAME="${OUTPUT_DATA_BUCKET_TABLE_NAME}"
+export KINESIS_STREAM_NAME="${KINESIS_STREAM_NAME}"
+export VISITS_INPUT_BUCKET="${VISITS_INPUT_BUCKET}"
+export VISITS_OUTPUT_BUCKET="${VISITS_OUTPUT_BUCKET}"
+export CLAIMS_OUTPUT_BUCKET="${CLAIMS_OUTPUT_BUCKET}"
+export LEAVEREQUESTS_OUTPUT_BUCKET="${LEAVEREQUESTS_OUTPUT_BUCKET}"
+export DEFAULT_OUTPUT_BUCKET="${DEFAULT_OUTPUT_BUCKET}"
+export VISITS_INPUT_KEY="${VISITS_INPUT_KEY}"
 export LOG_GROUP="${LOG_GROUP_NAME}"
 export LOG_STREAM="${LOG_STREAM_NAME}"
 export APP_NAME="${APP_NAME}"

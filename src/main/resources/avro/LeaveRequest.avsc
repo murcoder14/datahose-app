@@ -1,0 +1,33 @@
+{
+  "namespace": "org.muralis.datahose.avro",
+  "type": "record",
+  "name": "LeaveRequest",
+  "doc": "Leave of absence request record",
+  "fields": [
+    {
+      "name": "employeeId",
+      "type": "string",
+      "doc": "Employee identifier"
+    },
+    {
+      "name": "leaveType",
+      "type": "string",
+      "doc": "Type of leave (e.g., Vacation, Sick, Personal)"
+    },
+    {
+      "name": "startDate",
+      "type": "string",
+      "doc": "Leave start date"
+    },
+    {
+      "name": "endDate",
+      "type": "string",
+      "doc": "Leave end date"
+    },
+    {
+      "name": "approvalStatus",
+      "type": "string",
+      "doc": "Approval status (e.g., Pending, Approved, Denied)"
+    }
+  ]
+}

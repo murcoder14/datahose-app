@@ -1,0 +1,28 @@
+{
+  "namespace": "org.muralis.datahose.avro",
+  "type": "record",
+  "name": "Claim",
+  "doc": "Claims processing record",
+  "fields": [
+    {
+      "name": "claimId",
+      "type": "string",
+      "doc": "Unique claim identifier"
+    },
+    {
+      "name": "status",
+      "type": "string",
+      "doc": "Claim status (e.g., Approved, Pending, Denied)"
+    },
+    {
+      "name": "amount",
+      "type": "double",
+      "doc": "Claim amount"
+    },
+    {
+      "name": "processedAt",
+      "type": "string",
+      "doc": "Timestamp when the claim was processed"
+    }
+  ]
+}
