@@ -48,19 +48,31 @@ public class LeaveProcessor extends RichFlatMapFunction<KinesisMessage, LeaveReq
             }
             
             // Extract fields and create Avro LeaveRequest
+            String requestId = dataNode.has("requestId") ? dataNode.get("requestId").asText() : java.util.UUID.randomUUID().toString();
             String employeeId = dataNode.get("employeeId").asText();
             String leaveType = dataNode.get("leaveType").asText();
             String startDate = dataNode.get("startDate").asText();
             String endDate = dataNode.get("endDate").asText();
-            String approvalStatus = dataNode.get("approvalStatus").asText();
+            String status = dataNode.get("approvalStatus").asText();
             
-            // Create Avro LeaveRequest using builder pattern
+            // Generate timestamp and partition fields
+            long eventTimestamp = System.currentTimeMillis();
+            java.time.ZonedDateTime zdt = java.time.Instant.ofEpochMilli(eventTimestamp)
+                .atZone(java.time.ZoneId.of("UTC"));
+            
+            // Create Avro LeaveRequest using builder pattern with all fields
             LeaveRequest leaveRequest = LeaveRequest.newBuilder()
+                .setRequestId(requestId)
                 .setEmployeeId(employeeId)
                 .setLeaveType(leaveType)
                 .setStartDate(startDate)
                 .setEndDate(endDate)
-                .setApprovalStatus(approvalStatus)
+                .setStatus(status)
+                .setEventTimestamp(eventTimestamp)
+                .setYear(zdt.getYear())
+                .setMonth(zdt.getMonthValue())
+                .setDay(zdt.getDayOfMonth())
+                .setHour(zdt.getHour())
                 .build();
             
             out.collect(leaveRequest);
@@ -68,7 +80,8 @@ public class LeaveProcessor extends RichFlatMapFunction<KinesisMessage, LeaveReq
             
         } catch (Exception e) {
             LOG.error("Error processing LeaveRequest JSON: {}", e.getMessage(), e);
-            throw e;
+            // Do not re-throw - let message be handled by error handling
+            // Flink will continue processing other messages
         }
     }
 }

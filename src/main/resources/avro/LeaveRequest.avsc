@@ -5,6 +5,11 @@
   "doc": "Leave of absence request record",
   "fields": [
     {
+      "name": "requestId",
+      "type": "string",
+      "doc": "Unique request identifier"
+    },
+    {
       "name": "employeeId",
       "type": "string",
       "doc": "Employee identifier"
@@ -25,9 +30,34 @@
       "doc": "Leave end date"
     },
     {
-      "name": "approvalStatus",
+      "name": "status",
       "type": "string",
       "doc": "Approval status (e.g., Pending, Approved, Denied)"
+    },
+    {
+      "name": "eventTimestamp",
+      "type": "long",
+      "doc": "Event timestamp in milliseconds"
+    },
+    {
+      "name": "year",
+      "type": "int",
+      "doc": "Partition field: year"
+    },
+    {
+      "name": "month",
+      "type": "int",
+      "doc": "Partition field: month"
+    },
+    {
+      "name": "day",
+      "type": "int",
+      "doc": "Partition field: day"
+    },
+    {
+      "name": "hour",
+      "type": "int",
+      "doc": "Partition field: hour"
     }
   ]
 }

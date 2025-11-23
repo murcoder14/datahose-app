@@ -19,7 +19,7 @@ else
 fi
 
 # Set Java 11
-sdk use java 11.0.28-amzn
+sdk use java 11.0.29-amzn
 echo -e "${GREEN}✓${NC} Java version: $(java -version 2>&1 | head -n 1)"
 
 # Load Flink configuration if it exists

@@ -1,828 +1,810 @@
+# Datahose Streaming Application
 
-# AWS Streaming Data Analytics Solution (Flink, S3)
-
-This project provides a complete, production-ready AWS solution for streaming data analytics using Apache Flink 1.19 (AWS Managed Flink) and S3. It demonstrates **batch-style aggregation** on bounded streams using stateful processing with `KeyedProcessFunction` to emit only final aggregated results.
-
-**Status:** ✅ Production-ready  
-**Region:** Configurable (uses your AWS CLI profile region)  
-**Last Updated:** November 16, 2025
-
----
+A real-time data streaming application built with **Apache Flink** that processes messages from **Amazon Kinesis Data Streams** and writes them to **Apache Iceberg** tables in an S3-based data lake. The application uses **Flink Side Outputs** to route different message types (Claims and Leave Requests) to separate processing pipelines.
 
 ## Table of Contents
 
-- [Quick Start](#quick-start)
-- [Solution Architecture](#solution-architecture)
-- [Components](#components)
-- [How Kinesis ARN is Passed](#how-kinesis-arn-is-passed)
-- [Scripts Reference](#scripts-reference)
-- [Application Details](#application-details)
-- [Data Structure](#data-structure)
-- [Testing & Monitoring](#testing--monitoring)
-- [Troubleshooting](#troubleshooting)
-- [Clean Up](#clean-up)
-- [Cost Estimation](#cost-estimation)
-- [Project Structure](#project-structure)
-- [Technologies Used](#technologies-used)
-- [References](#references)
+- [Architecture Overview](#architecture-overview)
+- [Key Technologies](#key-technologies)
+- [Local Development Setup](#local-development-setup)
+- [Running the Application](#running-the-application)
+- [Technical Deep Dive](#technical-deep-dive)
+  - [Flink Side Outputs Pattern](#flink-side-outputs-pattern)
+  - [Avro Schema Evolution](#avro-schema-evolution)
+  - [Iceberg Integration](#iceberg-integration)
+  - [Checkpointing and State](#checkpointing-and-state)
+- [Testing](#testing)
+- [AWS Deployment](#aws-deployment)
+- [Monitoring and Troubleshooting](#monitoring-and-troubleshooting)
 
 ---
 
+## Architecture Overview
 
-## Solution Architecture
+```
+┌─────────────────┐
+│  Kinesis Data   │
+│     Stream      │  JSON messages (Claims, Leave Requests)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Flink Source   │  SimpleStringSchema deserialization
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ MessageRouter   │  Side Outputs: routes by messageType field
+└────────┬────────┘
+         │
+    ┌────┴────┬──────────────────┬───────────────┐
+    ▼         ▼                  ▼               ▼
+┌───────┐ ┌────────┐      ┌──────────┐   ┌──────────┐
+│Claims │ │ Leave  │      │ Unknown  │   │  Parse   │
+│  TAG  │ │  TAG   │      │   TAG    │   │  Error   │
+└───┬───┘ └───┬────┘      └─────┬────┘   └────┬─────┘
+    │         │                  │             │
+    ▼         ▼                  ▼             ▼
+┌────────┐ ┌────────┐      ┌──────────────────────┐
+│Claims  │ │Leave   │      │   Unknown Messages   │
+│Process │ │Process │      │   S3 FileSink        │
+└───┬────┘ └───┬────┘      └──────────────────────┘
+    │          │
+    ▼          ▼
+┌────────────────────────┐
+│  Iceberg Sink Builder  │
+│  (SpecificRecord →     │
+│   RowData Conversion)  │
+└───────────┬────────────┘
+            │
+            ▼
+┌────────────────────────┐
+│  Apache Iceberg Tables │
+│  (Avro, Partitioned)   │
+│  - tm_data_lake.claims │
+│  - tm_data_lake.leave  │
+│    _requests           │
+└───────────┬────────────┘
+            │
+            ▼
+┌────────────────────────┐
+│   AWS Glue Catalog     │
+│   (Metadata Storage)   │
+└────────────────────────┘
+            │
+            ▼
+┌────────────────────────┐
+│   Amazon Athena        │
+│   (SQL Queries)        │
+└────────────────────────┘
+```
 
+**Data Flow:**
+
+1. **Ingestion:** JSON messages sent to Kinesis Data Stream
+2. **Routing:** Flink reads from Kinesis and routes messages using Side Outputs based on `messageType` field
+3. **Processing:** Each pipeline (Claims, Leave Requests) converts JSON → Avro SpecificRecord
+4. **Storage:** Iceberg sink converts SpecificRecord → RowData and writes to partitioned Avro data files
+5. **Cataloging:** Glue tracks table schemas and partitions via Iceberg metadata files
+6. **Querying:** Athena provides SQL interface to query Iceberg tables
+
+---
+
+## Key Technologies
+
+### Apache Flink 1.20.0
+- **Streaming Engine:** Processes unbounded data streams with low latency
+- **Checkpointing:** Exactly-once semantics via distributed snapshots (30-second interval)
+- **Side Outputs:** Splits single stream into multiple typed outputs without duplication
+- **Parallelism:** Currently set to 1 (adjustable for scale)
+
+### Amazon Kinesis Data Streams
+- **Message Ingestion:** Durable, scalable message queue
+- **Retention:** 24 hours (default)
+- **Shards:** 1 shard (adjustable for throughput)
+- **Consumer:** Flink KinesisStreamsSource with at-least-once delivery
+
+### Apache Avro
+- **Schema Definition:** `.avsc` files in `src/main/resources/avro/`
+- **Code Generation:** Maven Avro plugin generates Java classes (SpecificRecord)
+- **Binary Serialization:** Compact, fast encoding for storage
+- **Evolution:** Schema compatibility rules for backwards/forwards compatibility
+
+### Apache Iceberg 1.9.1
+- **Table Format:** ACID transactions, schema evolution, time travel, hidden partitioning
+- **Storage:** Avro data files organized by year/month/day/hour partitions
+- **Catalog:** AWS Glue Data Catalog for metadata management
+- **Commits:** Atomically commits on Flink checkpoints (30-second interval)
+
+### AWS Managed Service for Apache Flink
+- **Serverless Flink:** No infrastructure management
+- **Auto-scaling:** KPU-based scaling (1 KPU = 1 vCPU + 4 GB RAM)
+- **Integrated Monitoring:** CloudWatch Logs and Metrics
+- **State Management:** Managed checkpoints and savepoints in S3
+
+---
+
+## Local Development Setup
+
+### Prerequisites
+
+1. **Java 11** (via SDKMAN)
+2. **Maven 3.9+**
+3. **AWS CLI v2** (configured with credentials)
+4. **Docker** (optional, for local testing)
+
+### Step 1: Install Dependencies
+
+```bash
+# Initialize SDKMAN
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+
+# Install Java 11
+sdk install java 11.0.29-amzn
+sdk use java 11.0.29-amzn
+
+# Verify installation
+java -version  # Should show 11.0.29
+
+# Install Maven (if needed)
+sdk install maven 3.9.9
 ```
+
+### Step 2: Configure AWS
+
+```bash
+# Set region
+aws configure set region us-east-2
+
+# Verify credentials
+aws sts get-caller-identity
 ```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                     AWS Cloud (Your Configured Region)                      │
-├──────────────────────────────────────────────────────────────────────────────┤
-│ S3 Input (gymvisits.csv) → Flink (Batch Aggregation) → S3 Output           │
-│                                                                              │
-│  ┌───────────────┐   ┌───────────────┐   ┌───────────────┐   ┌────────────┐  │
-│  │ S3 Input     │   │ Flink         │   │ Keyed         │   │ S3 Output  │  │
-│  │ gymvisits.csv│──→│ FileSource    │──→│ ProcessFunc   │──→│ FileSink   │  │
-│  │              │   │ (Read CSV)    │   │ (Accumulate)  │   │ (Results)  │  │
-│  └───────────────┘   └───────────────┘   └───────────────┘   └────────────┘  │
-│                                                                              │
-│  Batch-Style Aggregation:                                                   │
-│  • Reads gym visit data from S3 (bounded stream)                           │
-│  • Accumulates visit counts per person in keyed state                      │
-│  • Uses KeyedProcessFunction with event-time timer at Long.MAX_VALUE       │
-│  • Emits only final aggregated totals when bounded input completes         │
-│  • No intermediate outputs - pure batch aggregation in streaming mode      │
-│  • Writes formatted output to S3                                           │
-└──────────────────────────────────────────────────────────────────────────────┘
+
+### Step 3: Set Up Environment
+
+```bash
+# Clone repository
+git clone <your-repo-url>
+cd datahose-app
+
+# Load environment variables
+source ./setup-env.sh
 ```
+
+The `setup-env.sh` script:
+- Initializes SDKMAN and sets Java 11
+- Loads Flink configuration from `/tmp/flink-config.env` (created by `iac_create.sh`)
+- Sets AWS region
+
+### Step 4: Build the Application
+
+```bash
+# Clean and compile
+mvn clean compile
+
+# Generate Avro classes (automatically done during compile)
+# Output: target/generated-sources/avro/org/muralis/datahose/avro/
+
+# Package uber JAR (includes all dependencies)
+mvn package -DskipTests
+
+# Verify JAR size (~221 MB)
+ls -lh target/datahose-app-1.0-SNAPSHOT.jar
+```
+
+**Maven Build Process:**
+
+1. **Avro Plugin:** Generates Java classes from `.avsc` schemas
+   - Input: `src/main/resources/avro/Claim.avsc`, `LeaveRequest.avsc`
+   - Output: `Claim.java`, `LeaveRequest.java` (extends SpecificRecord)
+   - Adds partition fields: `year`, `month`, `day`, `hour`
+
+2. **Maven Compiler:** Compiles all Java sources (including generated Avro classes)
+
+3. **Shade Plugin:** Creates uber JAR with relocated packages
+   - Relocates: Jackson, Guava, Netty (avoids classpath conflicts)
+   - Transforms: Hadoop FileSystem services, Flink configuration
+   - Excludes: AWS SDK (provided by Flink runtime)
+
+---
+
+## Running the Application
+
+### Local Testing (IDE)
+
+**Option 1: Run from IntelliJ IDEA**
+
+1. Open project in IntelliJ
+2. Set VM options in Run Configuration:
+   ```
+   -Daws.region=us-east-2
+   ```
+3. Set environment variables:
+   ```
+   KINESIS_STREAM_ARN=<your-stream-arn>
+   DEFAULT_OUTPUT_BUCKET=<your-bucket>
+   ICEBERG_WAREHOUSE_BUCKET=<your-iceberg-bucket>
+   GLUE_DATABASE_NAME=tm_data_lake
+   ```
+4. Run `StreamingApp.main()`
+
+**Option 2: Run from Command Line**
+
+```bash
+# Requires local Flink cluster
+flink run -c org.muralis.datahose.StreamingApp \
+  target/datahose-app-1.0-SNAPSHOT.jar
+```
+
+### AWS Deployment
+
+See dedicated guides:
+- **Infrastructure:** [AWS_IaC.md](./AWS_IaC.md) - Create/destroy AWS resources
+- **CI/CD:** [AWS_CICD.md](./AWS_CICD.md) - Build and deploy application
+
+**Quick Start:**
+
+```bash
+# 1. Create infrastructure
+./iac_create.sh
+source /tmp/flink-config.env
+
+# 2. Build and deploy
+./cicd.sh
+
+# 3. Verify deployment
+./verify.sh
+
+# 4. Send test data
+./test.sh
 ```
 
 ---
 
----
+## Technical Deep Dive
 
+### Flink Side Outputs Pattern
 
-## Components
+**What are Side Outputs?**
 
+Side Outputs allow a single Flink operator to emit records to multiple named output streams. This is more efficient than using `filter()` or `split()` because:
+- Records are only processed once (no duplication)
+- Type-safe routing with OutputTag
+- Supports different data types per output
 
-### Flink Application (`datahose-app`)
-- Apache Flink 1.19 (STREAMING mode)
-- Java 11 (SDKMAN: 11.0.29-amzn)
-- **Input:** Reads CSV files from S3 using FileSource (bounded streams)
-- **Processing:** Batch-style aggregation using KeyedProcessFunction with stateful accumulation
-- **Key Innovation:** Event-time timer at Long.MAX_VALUE ensures emission only when bounded input completes
-- **Output:** Writes final aggregated results to S3 using FileSink (no intermediate outputs)
-- Checkpointing: 60s
-- Rolling Policy: 5s rollover / 3s inactivity
+**Implementation in MessageRouter:**
 
-### S3 Buckets
-- **Dynamic Naming:** Buckets are created with the current date and Unix epoch for uniqueness, e.g. `tm-streaming-app-bucket-20251010-1760143646` and `tm-data-bucket-20251010-1760143646`.
-- Application Bucket: `tm-streaming-app-bucket-<date>-<epoch>` (stores JAR)
-- Data Bucket: `tm-data-bucket-<date>-<epoch>` (stores input CSV and output results)
-  - Buckets are auto-detected by scripts; no need to manually update names after each deployment.
-
-### Input Data
-- **Format:** CSV file (`gymvisits.csv`)
-- **Schema:** name (STRING), date (STRING)
-- **Location:** `inputs/` directory (local) or S3 input bucket
-- **Example Data:** Gym visit records for aggregation
-
-### IAM Resources
-- Role: `datahose-app-flink-role` (for Flink)
-- Policy: `datahose-app-flink-policy` (S3, CloudWatch)
-
-### CloudWatch
-- Log Group: `/aws/kinesis-analytics/datahose-app`
-- Retention: 7 days
-
----
-
-## How Application Configuration Works
-
-The Flink application reads S3 paths and configuration directly from the code or environment variables. For S3-to-S3 processing:
-
-1. **Input Path:** Configured in `StreamingApp.java` to read from S3 bucket
-2. **Output Path:** Configured in `StreamingApp.java` to write to S3 bucket
-3. **Environment Variables:** Can be passed via AWS Managed Flink Application Properties if needed
-
-**Key Java code:**
 ```java
-// S3 paths configured in the application
-String s3InputPath = "s3a://your-input-bucket/gymvisits.csv";
-String s3OutputPath = "s3a://your-output-bucket/results/";
+public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
+    
+    // Define output tags (one per message type)
+    public static final OutputTag<KinesisMessage> CLAIMS_TAG = 
+        new OutputTag<KinesisMessage>("claims-output") {};
+    
+    public static final OutputTag<KinesisMessage> LEAVE_TAG = 
+        new OutputTag<KinesisMessage>("leave-output") {};
+    
+    public static final OutputTag<KinesisMessage> UNKNOWN_TAG = 
+        new OutputTag<KinesisMessage>("unknown-output") {};
+    
+    @Override
+    public void processElement(String value, Context ctx, Collector<KinesisMessage> out) {
+        JsonNode jsonNode = objectMapper.readTree(value);
+        KinesisMessage message = new KinesisMessage();
+        message.setMetadata(value);
+        
+        // Route based on messageType field
+        if (jsonNode.has("messageType")) {
+            String messageType = jsonNode.get("messageType").asText();
+            
+            switch (messageType) {
+                case "CLAIM":
+                    message.setMessageType("CLAIM");
+                    ctx.output(CLAIMS_TAG, message);  // Emit to claims stream
+                    break;
+                    
+                case "LEAVE_REQUEST":
+                    message.setMessageType("LEAVE_REQUEST");
+                    ctx.output(LEAVE_TAG, message);  // Emit to leave stream
+                    break;
+                    
+                default:
+                    ctx.output(UNKNOWN_TAG, message);  // Unknown types
+                    break;
+            }
+        } else {
+            // Fallback: detect by field presence
+            JsonNode dataNode = jsonNode.has("data") ? jsonNode.get("data") : jsonNode;
+            
+            if (dataNode.has("claimId")) {
+                ctx.output(CLAIMS_TAG, message);
+            } else if (dataNode.has("employeeId")) {
+                ctx.output(LEAVE_TAG, message);
+            } else {
+                ctx.output(UNKNOWN_TAG, message);
+            }
+        }
+    }
+}
+```
 
-// Create FileSource to read from S3
-FileSource<String> source = FileSource
-    .forRecordStreamFormat(new TextLineInputFormat(), new Path(s3InputPath))
-    .build();
+**Extracting Side Outputs:**
+
+```java
+// Main stream processes and routes messages
+SingleOutputStreamOperator<KinesisMessage> mainStream = 
+    kinesisStream.process(new MessageRouter())
+        .uid("message-router-operator");
+
+// Extract side output streams
+DataStream<KinesisMessage> claimsStream = mainStream.getSideOutput(MessageRouter.CLAIMS_TAG);
+DataStream<KinesisMessage> leaveStream = mainStream.getSideOutput(MessageRouter.LEAVE_TAG);
+DataStream<KinesisMessage> unknownStream = mainStream.getSideOutput(MessageRouter.UNKNOWN_TAG);
+
+// Process each stream independently
+configureClaimsPipeline(claimsStream, icebergClaimsProps);
+configureLeavePipeline(leaveStream, icebergLeaveProps);
 ```
 
 **Benefits:**
-- No external dependencies like Kinesis
-- Simple file-based processing
-- Easy to test locally with file paths
-- AWS best practice for batch/bounded stream processing
+- **Scalability:** Each pipeline can have different parallelism
+- **Maintainability:** Add new message types without modifying existing pipelines
+- **Observability:** Separate metrics per pipeline (numRecordsIn, numRecordsOut)
+- **Fault Isolation:** Failure in one pipeline doesn't affect others
 
 ---
 
----
+### Avro Schema Evolution
 
+**Schema Definition (Claim.avsc):**
 
-## Prerequisites
-
-1. **AWS CLI** (v2+)
-2. **Maven** (3.x+)
-3. **Java 11** (via SDKMAN recommended)
-4. **jq** (for JSON parsing)
-5. **AWS credentials** with permissions for IAM, S3, CloudWatch
-6. **AWS Region** configured in your AWS CLI profile (e.g., via `aws configure`)
-
----
-
-
-## 🚀 Quick Start
-
-### 1. Set Java Version (REQUIRED in every new terminal)
-```bash
-sdk use java 11.0.29-amzn
+```json
+{
+  "namespace": "org.muralis.datahose.avro",
+  "type": "record",
+  "name": "Claim",
+  "fields": [
+    {"name": "claimId", "type": "string"},
+    {"name": "claimAmount", "type": "double"},
+    {"name": "claimDate", "type": "string"},
+    {"name": "claimStatus", "type": "string"},
+    {"name": "eventTimestamp", "type": "long"},
+    {"name": "year", "type": "int"},
+    {"name": "month", "type": "int"},
+    {"name": "day", "type": "int"},
+    {"name": "hour", "type": "int"}
+  ]
+}
 ```
 
-### 2. Create Infrastructure (Dynamic Buckets)
-```bash
-./iac_create.sh
-# No need to manually update bucket names; scripts will auto-detect the latest.
-```
+**Partition Fields:**
 
-### 3. Build & Deploy Application
-```bash
-./cicd.sh
-```
+The schema includes partition fields (`year`, `month`, `day`, `hour`) calculated from the current event timestamp:
 
-### 4. Verify Deployment (Self-Contained)
-```bash
-./verify.sh
-# No need to source config; always checks the latest buckets.
-```
-
-### 5. Upload Input Data (Optional for testing)
-```bash
-# Upload sample CSV to S3 input bucket
-aws s3 cp inputs/gymvisits.csv s3://<your-input-bucket>/
-```
-
-### 6. Monitor Logs & Output
-```bash
-aws logs tail /aws/kinesis-analytics/datahose-app --follow
-aws s3 ls s3://<latest-tm-data-bucket-*>/results/ --recursive
-aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -20
-# Output should show aggregated gym visits per person
-```
-
----
-
-## Scripts Reference
-
-### `setup-env.sh` - Environment Setup
-
-**Purpose:** Initialize development environment
-
-**What it does:**
-- Loads SDKMAN and sets Java 11
-- Loads Flink configuration from `/tmp/flink-config.env`
-- Configures AWS region from CLI profile
-- Displays available commands
-
-**Usage:**
-```bash
-./setup-env.sh
-```
-
-**Output:**
-- Environment variables loaded
-- Java version confirmed
-- AWS region confirmed
-
----
-
-### `iac_create.sh` - Infrastructure Creation
-
-**Purpose:** Create all AWS infrastructure
-
-**What it does:**
-1. Creates S3 bucket for application JAR with versioning
-2. Creates S3 bucket for data sink with versioning
-3. Creates CloudWatch log group with 7-day retention
-4. Creates IAM role with trust policy for Kinesis Analytics
-5. Creates IAM policy with S3, CloudWatch, and VPC permissions
-6. Attaches policy to role
-7. Saves configuration to `/tmp/flink-config.env`
-
-**Usage:**
-```bash
-./iac_create.sh
-```
-
-**Configuration saved:**
-```bash
-export APP_NAME="datahose-app"
-export STREAMING_APP_BUCKET="tm-streaming-app-bucket-20251010"
-export DATA_BUCKET="tm-data-bucket-20251010"
-export REGION="<your-aws-region>"  # Detected from AWS CLI profile
-export FLINK_ROLE_ARN="arn:aws:iam::ACCOUNT_ID:role/datahose-app-flink-role"
-```
-
-**Resources Created:**
-- S3 buckets (versioned)
-- IAM role and policy
-- CloudWatch log group
-- Configuration file
-
----
-
-### `cicd.sh` - Build and Deploy
-
-**Purpose:** Build application and deploy to Managed Flink
-
-**What it does:**
-1. Initializes Java 11 via SDKMAN
-2. Builds Maven project (`mvn clean package`)
-3. Uploads JAR to S3 with versioning
-4. Creates Flink application (if first deployment)
-5. Updates Flink application (if already exists)
-6. Stops application if running before update
-7. Starts application in STREAMING mode
-8. Monitors deployment status
-9. Displays initial logs
-
-**Usage:**
-```bash
-# Load configuration first
-source /tmp/flink-config.env
-
-# Run CI/CD
-./cicd.sh
-```
-
-**Build Output:**
-- JAR file: `target/datahose-app.jar` (31 MB)
-- Uploaded to: `s3://tm-streaming-app-bucket-20251010/datahose-app.jar`
-
-**Application Versions:**
-- Each deployment increments version number
-- Previous versions retained in S3 (versioning enabled)
-
----
-
-### `verify.sh` - Health Check (Self-Contained)
-
-**Purpose:** Verify all resources and application health
-
-**Key Features:**
-- **Self-contained:** No need to run `source /tmp/flink-config.env` or set environment variables.
-- **Auto-detects** the latest dynamic S3 bucket names for both application and data buckets by creation date and prefix.
-- Checks AWS credentials, S3 buckets, IAM role, CloudWatch log group, Flink application status, and recent logs.
-
-**Usage:**
-```bash
-./verify.sh
-```
-
-**How it works:**
-- Finds the most recently created `tm-streaming-app-bucket-*` and `tm-data-bucket-*` buckets automatically.
-- Lists JAR files and recent data files.
-- No manual configuration needed after each deployment.
-
-**Example Output:**
-```
-╔════════════════════════════════════════════════════════╗
-║     Flink Application Verification Report             ║
-╚════════════════════════════════════════════════════════╝
-
-=== AWS Credentials ===
-[✓] Account ID: 047472788728
-[✓] User/Role: arn:aws:iam::047472788728:user/username
-
-=== S3 Buckets ===
-[✓] Application bucket exists: tm-streaming-app-bucket-20251010-1760143646
-[✓] JAR files in bucket: 1
-[✓] Data bucket exists: tm-data-bucket-20251010-1760143646
-[✓] Table folder exists: datafall
-[✓] Files in table: 4
-
-  Recent files:
-  2025-10-10 20:47:40 tm-data-bucket-20251010-1760143646
-  ...
-
-=== IAM Resources ===
-[✓] IAM Role exists: datahose-app-flink-role
-[✓] Role ARN: arn:aws:iam::047472788728:role/datahose-app-flink-role
-[✓] Attached policies: 1
-
-=== CloudWatch Logs ===
-[✓] Log group exists: /aws/kinesis-analytics/datahose-app
-[✓] Retention period: 7 days
-[✓] Log streams: 1
-
-=== Flink Application ===
-[✓] Application exists: datahose-app
-[✓] Status: RUNNING ✓
-[✓] Version: 1
-[✓] Runtime: FLINK-1_20
-[✓] Created: 2025-10-10T20:48:53-04:00
-[✓] Last Updated: 2025-10-10T20:50:42-04:00
-
-[✓] Recent log entries (last 5 minutes):
-...
-
-=== Summary ===
-Health Score: 7/7 checks passed
-[✓] All systems operational! ✓
-```
-
----
-
-### `iac_destroy.sh` - Infrastructure Cleanup
-
-**Purpose:** Destroy all AWS resources (with confirmation)
-
-**What it does:**
-1. Stops Flink application if running
-2. Deletes Flink application
-3. Deletes all S3 objects (including versions)
-4. Deletes S3 buckets
-5. Detaches and deletes IAM policy
-6. Deletes IAM role
-7. Deletes CloudWatch log group
-8. Removes configuration file
-
-**Usage:**
-```bash
-# Interactive mode (with confirmation prompt)
-./iac_destroy.sh
-
-# Force mode (skip confirmation)
-./iac_destroy.sh --force
-```
-
-**Safety Features:**
-- Requires explicit "yes" confirmation
-- Shows list of resources before deletion
-- Handles versioned S3 objects properly
-- Gracefully handles missing resources
-
-**Warning:** This is destructive and cannot be undone!
-
----
-
-
-## Application Details
-
-**File:** `src/main/java/org/muralis/datahose/StreamingApp.java`
-
-**Key Features:**
-- **S3-to-S3 Analytical Processing:** Reads CSV data from S3, performs aggregations, writes results to S3
-- **Stateful Batch Aggregation:** Uses KeyedProcessFunction with ValueState to accumulate counts
-- **Event-Time Timer Pattern:** Registers timer at Long.MAX_VALUE - 1 to detect end of bounded input
-- **Single Emission per Key:** Outputs only final aggregated totals (no intermediate results)
-- **Checkpointing:** 60s intervals for fault tolerance
-- **Rolling Policy:** 5s rollover, 3s inactivity for output files
-
-### Batch-Style Aggregation in Streaming Mode
-
-#### The Challenge: AWS Managed Flink and BATCH Mode
-
-Multiple approaches were attempted to achieve proper batch aggregation:
-
-1. **Table API with GROUP BY:** Produces changelog streams with UPDATE_BEFORE/UPDATE_AFTER rows
-   - `toChangelogStream().filter(INSERT)` only captures first occurrence
-   - `toDataStream()` rejected by planner for updating tables
-   - SQL projections maintain update semantics
-
-2. **Windowing Approaches:** GlobalWindows with CountTrigger fire on every element (incremental outputs)
-
-3. **RuntimeExecutionMode.BATCH:** AWS Managed Flink throws `UnsupportedOperationException`:
-   ```
-   ResultPartition.getAllDataProcessedFuture not supported
-   ```
-
-#### The Solution: KeyedProcessFunction with State
-
-**Core Implementation:**
 ```java
-.keyBy(value -> value.f0)
-.process(new KeyedProcessFunction<String, Tuple2<String, Integer>, Tuple2<String, Integer>>() {
-    private ValueState<Integer> countState;
-    private ValueState<Boolean> timerRegistered;
-    
+public class ClaimsProcessor extends RichFlatMapFunction<KinesisMessage, Claim> {
     @Override
-    public void open(Configuration parameters) {
-        countState = getRuntimeContext().getState(
-            new ValueStateDescriptor<>("count", Types.INT));
-        timerRegistered = getRuntimeContext().getState(
-            new ValueStateDescriptor<>("timer", Types.BOOLEAN));
-    }
-    
-    @Override
-    public void processElement(Tuple2<String, Integer> value, Context ctx, 
-                               Collector<Tuple2<String, Integer>> out) throws Exception {
-        // Accumulate count in state
-        Integer currentCount = countState.value();
-        countState.update((currentCount == null ? 0 : currentCount) + value.f1);
+    public void flatMap(KinesisMessage message, Collector<Claim> out) {
+        JsonNode dataNode = objectMapper.readTree(message.getMetadata()).get("data");
         
-        // Register timer on first element for this key
-        if (timerRegistered.value() == null) {
-            ctx.timerService().registerEventTimeTimer(Long.MAX_VALUE - 1);
-            timerRegistered.update(true);
-        }
+        // Extract fields from the "data" object
+        String claimId = dataNode.get("claimId").asText();
+        String claimStatus = dataNode.get("status").asText();
+        double claimAmount = dataNode.get("amount").asDouble();
+        String claimDate = dataNode.get("processedAt").asText();
+        
+        // Generate timestamp and partition values from current time
+        long eventTimestamp = System.currentTimeMillis();
+        ZonedDateTime zdt = Instant.ofEpochMilli(eventTimestamp)
+            .atZone(ZoneId.of("UTC"));
+        
+        Claim claim = Claim.newBuilder()
+            .setClaimId(claimId)
+            .setClaimAmount(claimAmount)
+            .setClaimDate(claimDate)
+            .setClaimStatus(claimStatus)
+            .setEventTimestamp(eventTimestamp)
+            .setYear(zdt.getYear())
+            .setMonth(zdt.getMonthValue())
+            .setDay(zdt.getDayOfMonth())
+            .setHour(zdt.getHour())
+            .build();
+        
+        out.collect(claim);
     }
-    
-    @Override
-    public void onTimer(long timestamp, OnTimerContext ctx, 
-                       Collector<Tuple2<String, Integer>> out) throws Exception {
-        // Emit final aggregated count when bounded input completes
-        out.collect(new Tuple2<>(ctx.getCurrentKey(), countState.value()));
+}
+```
+
+**Why Use Avro for Streaming?**
+
+This project uses Avro instead of Parquet or ORC because Avro is specifically optimized for streaming data ingestion scenarios. Here's why:
+
+1. **Row-Based Storage for Fast Writes**
+   - **Streaming Optimized:** Avro is a row-based format designed for efficient data serialization, making it ideal for write-heavy use cases like data ingestion from Kinesis
+   - **High Write Efficiency:** Unlike columnar formats (Parquet/ORC), Avro can write complete records quickly without buffering for column reorganization
+   - **Fast Full Record Reads:** Optimized for reading entire records, which is common in streaming pipelines
+
+2. **Excellent Schema Evolution**
+   - **Schema Stored with Data:** Avro stores the schema alongside the data, enabling easier data exchange and evolution over time
+   - **Seamless Version Changes:** Add/remove fields without breaking readers
+     - Forward Compatibility: Old readers can read new data (with default values)
+     - Backward Compatibility: New readers can read old data (ignore unknown fields)
+   - **AWS Glue Schema Registry:** Avro integrates with AWS Glue Schema Registry for centralized schema management and validation
+
+3. **Perfect Fit for Apache Kafka and Flink**
+   - **Streaming Ecosystem:** Avro is the de facto standard in streaming platforms (Kafka, Flink, NiFi)
+   - **Confluent Integration:** Native support in Kafka ecosystem for Avro serialization/deserialization
+   - **Kinesis Data Streams:** AWS recommends Avro for schema validation in streaming scenarios
+
+4. **Compact Binary Serialization**
+   - **Size Efficiency:** Binary format is ~40% smaller than JSON
+   - **Type Safety:** Compile-time validation of field types via SpecificRecord classes
+   - **Fast Serialization:** Optimized binary encoding for low-latency streaming
+
+5. **Iceberg Native Support**
+   - **One of Three Formats:** Avro is a native Iceberg format (alongside Parquet and ORC)
+   - **Compaction Ready:** AWS S3 Tables now supports auto-compaction for Avro files in Iceberg tables
+   - **Query Performance:** While not as optimized for analytics as columnar formats, Avro provides acceptable query performance with Iceberg's metadata-driven pruning
+
+**When to Use Each Format:**
+
+| Format | Best For | This Project |
+|--------|----------|--------------|
+| **Avro** | Data ingestion, streaming, serialization, Kafka/Flink pipelines | ✅ **Used** - Kinesis streaming |
+| **Parquet** | Analytics queries across columns, read-heavy workloads | ❌ Not needed - write-heavy use case |
+| **ORC** | Hive-based queries, heavy compression, numerical data | ❌ Not needed - not using Hive |
+
+**Trade-offs:**
+- **Analytics Performance:** Avro is slower than Parquet for analytical queries (e.g., `SELECT AVG(claimAmount) GROUP BY insurancePlan`) because it must read entire rows instead of just the `claimAmount` column
+- **Compression:** Avro has moderate compression (not as aggressive as ORC), but this is acceptable for streaming where write speed matters more
+- **Compaction:** AWS S3 Tables auto-compaction now supports Avro (as of 2025), improving query performance by merging small files into larger ones
+
+**Why Not Parquet?**
+- Parquet is optimized for analytics (columnar scans), not for streaming ingestion
+- Write performance is moderate because it buffers rows to reorganize into column chunks
+- Better suited for batch ETL jobs, not real-time Kinesis streams
+
+For this Flink streaming application ingesting from Kinesis, **Avro is the optimal choice** due to its high write efficiency, excellent schema evolution, and strong ecosystem support with Kafka, Flink, and AWS streaming services.
+
+---
+
+### Iceberg Integration
+
+**What is Apache Iceberg?**
+
+Iceberg is a high-performance table format for huge analytic tables. It provides:
+- **ACID Transactions:** Atomic commits, isolation, consistency
+- **Schema Evolution:** Add/drop/rename columns without rewriting data
+- **Hidden Partitioning:** User queries don't need to know partition structure
+- **Time Travel:** Query data as of specific snapshots
+- **Incremental Reads:** Read only new data since last query
+
+**Iceberg Warehouse Structure:**
+
+The Iceberg warehouse bucket (`s3://tm-iceberg-warehouse-<timestamp>/`) stores all table data and metadata. Here's the actual structure from your deployment:
+
+```
+s3://tm-iceberg-warehouse-20251122-1763865696/
+├── claims/
+│   ├── data/                                    # Actual claim records (Avro format)
+│   │   └── year=2025/month=11/day=23/hour=2/
+│   │       ├── 00000-0-b61a8294-...-00001.avro  # Data file #1 (1.7 KB)
+│   │       └── 00000-0-b61a8294-...-00002.avro  # Data file #2 (1.9 KB)
+│   │
+│   └── metadata/                                # Iceberg table metadata
+│       ├── 00000-5cfa2c72-....metadata.json     # Table metadata v0 (schema, partitions)
+│       ├── 00001-c368c6c7-....metadata.json     # Table metadata v1 (after 1st commit)
+│       ├── 00002-cef22e28-....metadata.json     # Table metadata v2 (after 2nd commit)
+│       ├── 62efaf82-...-m0.avro                 # Manifest file (lists data files)
+│       ├── 311918b2-...-m0.avro                 # Manifest file (lists data files)
+│       ├── snap-4516515981681948211-1-....avro  # Snapshot manifest list v1
+│       └── snap-8038161822972775292-1-....avro  # Snapshot manifest list v2
+│
+└── leave_requests/
+    ├── data/                                    # Actual leave request records
+    │   └── year=2025/month=11/day=23/hour=2/
+    │       └── 00000-0-534e4f16-...-00001.avro  # Data file (2.2 KB)
+    │
+    └── metadata/                                # Iceberg table metadata
+        ├── 00000-24d0f73c-....metadata.json     # Table metadata v0
+        ├── 00001-ce54e781-....metadata.json     # Table metadata v1
+        ├── d7bb2a26-...-m0.avro                  # Manifest file
+        └── snap-8473476169081210602-1-....avro  # Snapshot manifest list
+```
+
+**File Types Explained:**
+
+1. **Data Files (`.avro` in `data/` folder)**
+   - **Purpose:** Store actual claim/leave request records in Avro binary format
+   - **Naming:** `<task-id>-<attempt>-<UUID>-<file-number>.avro`
+   - **Partitioning:** Organized by year/month/day/hour for efficient querying
+   - **Size:** Typically a few KB to several MB per file
+   - **Example:** `00000-0-b61a8294-6c07-4cfc-bb36-c9eac1c2d942-00001.avro` contains claim records from hour 2 on Nov 23, 2025
+
+2. **Metadata JSON Files (`.metadata.json`)**
+   - **Purpose:** Define table schema, partition spec, sort order, and point to current snapshot
+   - **Versioning:** Each commit creates a new metadata file (v0, v1, v2, ...)
+   - **Contents:**
+     - Table schema (columns, types)
+     - Partition specification (year/month/day/hour)
+     - Current snapshot ID
+     - Table properties (format version, write settings)
+   - **Example:** `00002-cef22e28-3754-4142-ba99-0361732be958.metadata.json` is the current metadata (version 2)
+
+3. **Manifest Files (`.avro` files like `311918b2-...-m0.avro`)**
+   - **Purpose:** List all data files in a snapshot with their statistics
+   - **Format:** Avro format containing:
+     - Data file paths
+     - File size and record count
+     - Partition values (year=2025, month=11, etc.)
+     - Column-level statistics (min/max values for pruning)
+   - **Example:** `311918b2-45ea-4d7d-845b-e5ce9ed22151-m0.avro` lists which data files are part of snapshot v2
+
+4. **Snapshot Manifest Lists (`snap-<snapshot-id>-1-<UUID>.avro`)**
+   - **Purpose:** Point to all manifest files for a specific snapshot
+   - **Contents:** List of manifest file locations and their metadata
+   - **Example:** `snap-8038161822972775292-1-311918b2-45ea-4d7d-845b-e5ce9ed22151.avro` is the manifest list for snapshot 8038161822972775292
+   - **Usage:** Query engines read this first to find relevant manifest files
+
+**How Iceberg Uses These Files:**
+
+```
+Query: SELECT * FROM claims WHERE year=2025 AND month=11
+
+1. Read latest metadata.json (00002-cef22e28-....json)
+   ↓ Get current snapshot ID: 8038161822972775292
+   
+2. Read snapshot manifest list (snap-8038161822972775292-1-....avro)
+   ↓ Get list of manifest files: [311918b2-...-m0.avro]
+   
+3. Read manifest file (311918b2-...-m0.avro)
+   ↓ Filter by partition (year=2025, month=11)
+   ↓ Get matching data files:
+   ↓   - 00000-0-b61a8294-...-00001.avro (year=2025, month=11, day=23, hour=2)
+   ↓   - 00000-0-b61a8294-...-00002.avro (year=2025, month=11, day=23, hour=2)
+   
+4. Read data files (00001.avro, 00002.avro)
+   ↓ Deserialize Avro records
+   ↓ Return results to user
+```
+
+**Why This Architecture?**
+
+- **ACID Transactions:** New commits create new metadata files atomically (no partial updates)
+- **Time Travel:** Old metadata.json files = historical table versions
+- **Partition Pruning:** Manifest files contain partition statistics → skip irrelevant data files
+- **Schema Evolution:** Add columns by updating metadata.json (no data rewrite needed)
+- **Scalability:** Millions of data files tracked efficiently via manifest files
+
+**Partition Pruning Example:**
+
+```sql
+-- Query only November 2025, hour 2 data (reads only 3 data files)
+SELECT * FROM tm_data_lake.claims
+WHERE year = 2025 AND month = 11 AND hour = 2;
+
+-- Athena reads:
+--   1. metadata.json (3.9 KB)
+--   2. manifest list (4.6 KB)
+--   3. manifest file (8.5 KB)
+--   4. Only 2 data files (1.7 KB + 1.9 KB = 3.6 KB)
+-- Total: ~20 KB instead of scanning entire table
+```
+
+---
+
+### Checkpointing and State
+
+**Flink Checkpointing Configuration:**
+
+```java
+env.enableCheckpointing(30000);  // 30 seconds
+env.getCheckpointConfig().setMinPauseBetweenCheckpoints(15000);  // 15 seconds
+env.getCheckpointConfig().setCheckpointTimeout(600000);  // 10 minutes
+```
+
+**How Checkpointing Works:**
+
+1. **Coordinator Triggers:** Every 30 seconds, JobManager initiates checkpoint
+2. **Barrier Injection:** Special checkpoint barriers flow through the data stream
+3. **State Snapshot:** Each operator saves its state to S3 when barrier arrives
+   - Kinesis consumer offsets
+   - Iceberg pending commits
+   - Window aggregations (if any)
+4. **Acknowledgment:** All operators report success to JobManager
+5. **Commit:** JobManager marks checkpoint as complete
+6. **Iceberg Commit:** On successful checkpoint, Iceberg commits pending files
+
+**Exactly-Once Semantics:**
+
+```
+Kinesis (at-least-once) + Flink State + Iceberg Commits = End-to-End Exactly-Once
+
+Example:
+1. Flink reads message from Kinesis (offset 100)
+2. Processes message, writes Avro data file to S3
+3. Checkpoint #N saves state: {kinesis_offset: 100, pending_file: abc123.avro}
+4. Iceberg commits file abc123.avro (atomic metadata update)
+5. Checkpoint completes successfully
+6. Application crashes ❌
+7. Flink restarts from checkpoint #N
+8. Resumes from Kinesis offset 100 (may re-read message)
+9. Iceberg detects duplicate file (idempotent commit) ✓
+10. Result: Message processed exactly once in Iceberg table
+```
+
+---
+
+## Testing
+
+### Send Test Messages to Kinesis
+
+```bash
+# Use test.sh script (recommended)
+./test.sh
+
+# Or manually with AWS CLI (note: data must be base64-encoded)
+# Claim message format:
+aws kinesis put-record \
+  --stream-name datahose-app-stream \
+  --partition-key "test-1" \
+  --data "$(echo '{
+    "messageType": "CLAIM",
+    "timestamp": "2025-11-22T10:30:00Z",
+    "data": {
+      "claimId": "CLM-2025-001",
+      "status": "Approved",
+      "amount": 1250.50,
+      "processedAt": "2025-11-22T10:30:00Z"
     }
-})
+  }' | base64)" \
+  --region us-east-2
+
+# Leave request message format:
+aws kinesis put-record \
+  --stream-name datahose-app-stream \
+  --partition-key "test-2" \
+  --data "$(echo '{
+    "messageType": "LEAVE_REQUEST",
+    "timestamp": "2025-11-22T10:35:00Z",
+    "data": {
+      "employeeId": "EMP-12345",
+      "leaveType": "Vacation",
+      "startDate": "2025-12-01",
+      "endDate": "2025-12-15",
+      "approvalStatus": "Approved"
+    }
+  }' | base64)" \
+  --region us-east-2
+
+# Alternative: Use file-based approach for complex JSON
+cat > /tmp/claim-test.json <<'EOF'
+{
+  "messageType": "CLAIM",
+  "timestamp": "2025-11-22T10:30:00Z",
+  "data": {
+    "claimId": "CLM-2025-001",
+    "status": "Approved",
+    "amount": 1250.50,
+    "processedAt": "2025-11-22T10:30:00Z"
+  }
+}
+EOF
+
+aws kinesis put-record \
+  --stream-name datahose-app-stream \
+  --partition-key "test-1" \
+  --data "$(cat /tmp/claim-test.json | base64)" \
+  --region us-east-2
 ```
 
-#### How It Works
+**Important:** The Claim message structure has these required fields in the `data` object:
+- `claimId`: Unique claim identifier (string)
+- `status`: Claim status like "Approved", "Pending", "Denied" (string)
+- `amount`: Claim amount (number)
+- `processedAt`: Processing timestamp in ISO-8601 format (string)
 
-1. **Stateful Accumulation:** Each key maintains a `ValueState<Integer>` accumulating visit counts
-2. **Timer Registration:** On first element per key, registers event-time timer at `Long.MAX_VALUE - 1`
-3. **End-of-Input Detection:** When bounded stream completes, watermark advances to Long.MAX_VALUE, firing timer
-4. **Single Emission:** Timer callback emits final aggregated count (no intermediate outputs)
+### Verify Data in Iceberg
 
-#### Why This Approach?
+**Using Athena (SQL):**
+```sql
+-- Count records
+SELECT COUNT(*) FROM tm_data_lake.claims;
 
-- **AWS Compatibility:** Works in STREAMING mode (required by AWS Managed Flink)
-- **Batch Semantics:** Achieves batch-style aggregation without true BATCH mode
-- **Correctness:** Emits only final totals after all input processed
-- **Simplicity:** No changelog handling, no windowing complexity
-
-#### Verification
-
-Input: 150 gym visits across 8 people in `gymvisits.csv`
-
-Output (final totals only):
-```
-Dan,7
-Kate,31
-Mark,31
-Peter,30
-Joe,20
-Len,19
-Jill,7
-Nick,5
-```
-
-#### References
-- [Flink ProcessFunction Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.19/docs/dev/datastream/operators/process_function/)
-- [Flink State Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.19/docs/dev/datastream/fault-tolerance/state/)
-
----
-
-## Data Structure
-
-### Input: S3 CSV File
-
-**Location:** `s3://tm-input-data-bucket-<date>-<epoch>/datafall/gymvisits.csv`
-
-**Format:** CSV with person name and timestamp
-```csv
-person,timestamp
-Dan,2024-10-21 10:15:00
-Kate,2024-10-21 10:30:00
-Joe,2024-10-21 11:00:00
-...
-```
-
-**Sample Data:** 150 gym visit records across 8 unique people
-
-### Output: S3 Aggregated Results
-
-**Location:** `s3://tm-output-data-bucket-<date>-<epoch>/datalake/`
-
-**Format:** CSV with person name and total visit count
-```csv
-Dan,7
-Kate,31
-Mark,31
-Peter,30
-Joe,20
-Len,19
-Jill,7
-Nick,5
-```
-
-**Characteristics:**
-- One row per unique person (8 total)
-- Final aggregated counts only (no intermediate outputs)
-- Results match actual CSV data (100% accuracy verified)
-
-**Example Output:**
-```
-Alice visited the gym 25 times
-Bob visited the gym 18 times
-Carol visited the gym 30 times
-```
-
-**Directory Structure:**
-```
-results/  (or datafall/)
-├── 2025-11-14--17/
-│   ├── part-0-0                    # Finalized file with aggregated results
-│   ├── part-0-1                    # Finalized file
-│   └── .part-0-2.inprogress.xyz    # In-progress
-├── ...
-```
-
-**Querying Data:**
-```bash
-# List files
-aws s3 ls s3://<latest-tm-data-bucket-*>/results/ --recursive
-# View sample
-aws s3 cp s3://<latest-tm-data-bucket-*>/results/part-0-0 - | head -10
-# Should show aggregated visit counts per person
+-- Query recent claims
+SELECT claimId, patientName, claimAmount, claimDate
+FROM tm_data_lake.claims
+WHERE year = 2025 AND month = 1
+ORDER BY claimDate DESC
+LIMIT 10;
 ```
 
 ---
 
----
+## AWS Deployment
 
+### Quick Reference
 
-## Testing & Monitoring
+| Task | Script | Description |
+|------|--------|-------------|
+| **Create Infrastructure** | `./iac_create.sh` | S3 buckets, Kinesis, Glue, IAM roles |
+| **Deploy Application** | `./cicd.sh` | Build JAR, upload to S3, create/update Flink app |
+| **Verify Health** | `./verify.sh` | Check all resources, app status, logs |
+| **Send Test Data** | `./test.sh` | Send sample claims and leave requests |
+| **Destroy Everything** | `./iac_destroy.sh` | Delete all AWS resources |
 
-### Upload Test Data
-```bash
-# Upload sample CSV to S3 input bucket
-aws s3 cp inputs/gymvisits.csv s3://tm-input-data-bucket-<date>-<epoch>/datafall/gymvisits.csv
-```
+### Detailed Guides
 
-### Monitor Logs
-```bash
-aws logs tail /aws/kinesis-analytics/datahose-app --follow
-```
-
-### Check S3 Output
-```bash
-# List output files
-aws s3 ls s3://tm-output-data-bucket-<date>-<epoch>/datalake/ --recursive
-
-# View aggregated results
-aws s3 cp s3://tm-output-data-bucket-<date>-<epoch>/datalake/part-0-0 - | head -20
-
-# Expected output (CSV format):
-# Dan,7
-# Kate,31
-# Mark,31
-# Peter,30
-# Joe,20
-# Len,19
-# Jill,7
-# Nick,5
-```
-
-### Verify Results
-After deployment, expect exactly 8 output rows (one per unique person) with final aggregated counts matching input data.
+- **Infrastructure:** [AWS_IaC.md](./AWS_IaC.md) - Complete infrastructure setup and management
+- **CI/CD:** [AWS_CICD.md](./AWS_CICD.md) - Build, deployment, and monitoring
 
 ---
 
+## Monitoring and Troubleshooting
 
-## Troubleshooting
+### CloudWatch Logs
 
-### Application won't start
 ```bash
-aws logs tail /aws/kinesis-analytics/datahose-app --since 10m | grep -i error
-aws kinesisanalyticsv2 describe-application --application-name datahose-app
+# Tail logs
+aws logs tail /aws/kinesis-analytics/datahose-app --follow --region us-east-2
+
+# Filter by keyword
+aws logs tail /aws/kinesis-analytics/datahose-app \
+  --filter-pattern "ERROR" \
+  --follow
 ```
-**Common Causes:**
-- S3 path or bucket name incorrect
-- IAM permissions missing
-- JAR file corrupt
 
-### No data in S3 output
-```bash
-aws s3 ls s3://tm-output-data-bucket-<date>-<epoch>/datalake/
-aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error"
-# Wait at least 5 seconds for first file (rolling policy)
-```
-**Common Causes:**
-- Input file missing or incorrect path
-- Timer not firing (check watermark advancement)
-- FileSink configuration issue
+### Key Metrics
 
-### Incorrect aggregation counts
-- Verify input CSV format: `person,timestamp` with header row
-- Check logs for parsing errors: `grep -i "flatmap\|parse" in application logs`
-- Ensure bounded stream: `WatermarkStrategy.forMonotonousTimestamps()`
-- Rebuild and redeploy: `./cicd.sh`
+| Metric | Description | Threshold |
+|--------|-------------|-----------|
+| `NumRecordsIn` | Records consumed from Kinesis | > 0 (if sending data) |
+| `NumRecordsOut` | Records written to sinks | Should match `NumRecordsIn` |
+| `CheckpointDuration` | Time to complete checkpoint | < 60 seconds |
+| `FullRestarts` | Number of full application restarts | 0 (indicates stability) |
 
-### Timer not firing (no output)
-- **Symptom:** Application runs but produces no output
-- **Cause:** Event-time watermark not advancing to Long.MAX_VALUE
-- **Check:** Input must be bounded (file-based) with proper watermark strategy
-- **Solution:** Verify `WatermarkStrategy.forMonotonousTimestamps()` is used
-
-### Region or Java version issues
-- Verify your AWS region is configured: `aws configure get region`
-- Always run `sdk use java 11.0.29-amzn` in every new terminal
+For detailed troubleshooting, see [AWS_CICD.md](./AWS_CICD.md).
 
 ---
-
-### Application Won't Start (Detailed)
-
-**Symptom:** Status stuck in `STARTING` or transitions to `RESTARTING`
-
-**Diagnosis:**
-```bash
-# Check recent logs
-aws logs tail /aws/kinesis-analytics/datahose-app --since 10m | grep -i error
-
-# Check application details
-aws kinesisanalyticsv2 describe-application \
-  --application-name datahose-app
-```
-
-**Common Causes:**
-1. **S3 Path Issue:** Bucket name or path incorrect in source code
-   - Fix: Update `StreamingApp.java` with correct bucket name
-   - Rebuild and redeploy
-
-2. **IAM Permissions:** Role doesn't have S3 read/write access
-   - Check policy: `aws iam get-role-policy --role-name datahose-app-flink-role --policy-name datahose-app-flink-policy`
-   - Verify S3 permissions are present
-
-3. **JAR File Corrupt:** Upload failed or build issue
-   - Rebuild: `mvn clean package`
-   - Re-upload: `./cicd.sh`
-
-### No Data in S3 (Detailed)
-
-**Symptom:** Application running but no files in S3 output bucket
-
-**Diagnosis:**
-```bash
-# Check if output bucket exists
-aws s3 ls s3://tm-output-data-bucket-<date>-<epoch>/datalake/
-
-# Check application logs for errors
-aws logs tail /aws/kinesis-analytics/datahose-app --since 30m | grep -i "s3\|error\|timer"
-
-# Verify rolling policy timing
-# Files appear after 3s inactivity OR 5s max interval
-```
-
-**Possible Causes:**
-1. **Input Missing:** Ensure `gymvisits.csv` exists in input bucket
-2. **Timer Not Firing:** Watermark not advancing (check bounded stream configuration)
-3. **Permissions:** Verify IAM role has GetObject and PutObject permissions
-4. **Path Issue:** Check application logs for S3 read/write errors
-
-### KeyedProcessFunction Debugging
-
-**Symptom:** No output or unexpected aggregation behavior
-
-**Debug Steps:**
-1. **Verify State Updates:** Add logging in `processElement()` to confirm counts accumulating
-2. **Check Timer Registration:** Log when timer registered (should be once per key)
-3. **Monitor Watermark:** Ensure watermark advances to Long.MAX_VALUE for bounded streams
-4. **Validate Input Parsing:** Check FlatMap output (should produce Tuple2<String, 1> per row)
-
-### Region Mismatch
-
-**Symptom:** Resources not found or "Access Denied" errors
-
-**Diagnosis:**
-```bash
-# Check configured region
-aws configure get region
-
-# Should output your intended region (e.g., us-east-1, us-west-2, etc.)
-```
-
-**Fix:**
-```bash
-# Set your desired region
-aws configure set region <your-preferred-region>
-
-# Re-run scripts
-./iac_create.sh
-./cicd.sh
-```
-
-### Java Version Issues
-
-**Symptom:** Build fails with Java version errors or "wrong version" messages
-
-**Diagnosis:**
-```bash
-java -version
-# Should show: openjdk version "11.x.x"
-
-# Check which Java is being used
-which java
-```
-
-**Fix:**
-```bash
-# RECOMMENDED: Use SDKMAN to set Java 11 (required in EVERY new shell session)
-sdk use java 11.0.29-amzn
-
-# Verify it's set correctly
-java -version
-
-# Alternative: Set JAVA_HOME manually
-export JAVA_HOME=$(dirname $(dirname $(which java)))
-
-# OR: Run the setup script which does this automatically
-./setup-env.sh
-```
-
-## Clean Up
-
-```bash
-# Interactive mode with confirmation
-./iac_destroy.sh
-# Or force without confirmation
-./iac_destroy.sh --force
-```
-
-This removes:
-- Flink application
-- S3 buckets (all objects including versions)
-- IAM role and policy
-- CloudWatch log group
-
----
-
----
-
-
-## Cost Estimation
-
-| Service              | Usage         | Estimated Cost |
-|----------------------|--------------|----------------|
-| Managed Flink        | 1 KPU, 24/7  | ~$45           |
-| S3 Storage           | ~100 GB      | ~$2.30         |
-| CloudWatch           | Logs/metrics | ~$2            |
-| Data Transfer        | Minimal      | ~$0.50         |
-| **Total**            |              | **~$50/month** |
-
----
-
----
-
-datahose-app/
 
 ## Project Structure
 
 ```
 datahose-app/
-├── src/main/java/org/muralis/datahose/StreamingApp.java
-├── src/test/java/org/muralis/datahose/
-├── target/datahose-app.jar
-├── pom.xml
-├── iac_create.sh
-├── iac_destroy.sh
-├── cicd.sh
-├── verify.sh
-├── setup-env.sh
-├── test.sh
-└── README.md
+├── src/main/java/org/muralis/datahose/
+│   ├── StreamingApp.java           # Main Flink application
+│   ├── dto/
+│   │   ├── KinesisMessage.java     # Wrapper for JSON messages
+│   │   └── MessageType.java        # Enum for message types
+│   ├── iceberg/
+│   │   └── IcebergSinkBuilder.java # Builds Iceberg sinks
+│   └── processors/
+│       ├── ClaimsProcessor.java    # JSON → Claim conversion
+│       ├── LeaveProcessor.java     # JSON → LeaveRequest conversion
+│       └── MessageRouter.java      # Side Outputs router
+├── src/main/resources/avro/
+│   ├── Claim.avsc                  # Claim Avro schema
+│   └── LeaveRequest.avsc           # LeaveRequest Avro schema
+├── pom.xml                         # Maven build configuration
+├── README.md                       # This file
+├── AWS_IaC.md                      # Infrastructure guide
+├── AWS_CICD.md                     # Deployment guide
+└── [deployment scripts]            # iac_create.sh, cicd.sh, verify.sh, etc.
 ```
 
 ---
 
----
-
-
-## Technologies Used
-
-- Apache Flink 1.20
-- Java 11 (SDKMAN: 11.0.29-amzn)
-- Maven 3.x
-- AWS Managed Service for Apache Flink
-- Amazon S3 (FileSource & FileSink)
-- Flink Table API & SQL
-- AWS IAM
-- Amazon CloudWatch
-- AWS CLI
-- Bash
-
----
-
----
-
-
 ## References
 
 - [Apache Flink Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.20/)
-- [AWS Managed Service for Apache Flink](https://docs.aws.amazon.com/kinesisanalytics/)
-- [Flink DataStream API](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/datastream/overview/)
-- [Flink Table API & Changelog Streams](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/table/data_stream_api/#handling-of-changelog-streams)
+- [Apache Iceberg Documentation](https://iceberg.apache.org/docs/1.9.1/)
+- [Apache Avro Documentation](https://avro.apache.org/docs/1.11.3/)
+- [AWS Managed Flink Developer Guide](https://docs.aws.amazon.com/managed-flink/latest/java/what-is.html)
+- [Flink Side Outputs](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/datastream/side_output/)
+- [AWS Prescriptive Guidance: Apache Iceberg on AWS](https://docs.aws.amazon.com/prescriptive-guidance/latest/apache-iceberg-on-aws/getting-started.html) - **Recommended reading for getting started with Iceberg on AWS**
 
 ---
 
-**License:** For educational and demonstration purposes.
-
-**Last Updated:** November 14, 2025  
-**Version:** 2.0  
-**Region:** Configurable (uses your AWS CLI profile region)
+**Last Updated:** November 22, 2025  
+**Version:** 2.0

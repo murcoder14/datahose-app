@@ -6,28 +6,25 @@ import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 import org.muralis.datahose.dto.KinesisMessage;
-import org.muralis.datahose.dto.MessageType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
  * Routes incoming Kinesis messages to appropriate side outputs based on message type.
- * Uses Flink's Side Output feature to split the stream into multiple processing pipelines.
+ * Uses Flink's Side Output feature to split the stream into multiple processing pipelines (Claims, Leave Requests, Unknown).
+ * This pattern enables clean separation of concerns and allows each pipeline to be scaled independently.
  */
 public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
     private static final Logger LOG = LoggerFactory.getLogger(MessageRouter.class);
     
     private final ObjectMapper objectMapper = new ObjectMapper();
     
-    // Define side output tags for each message type
+    // Define side output tags for each message type (Claims and Leave Requests only)
     public static final OutputTag<KinesisMessage> CLAIMS_TAG = 
         new OutputTag<KinesisMessage>("claims-output") {};
     
     public static final OutputTag<KinesisMessage> LEAVE_TAG = 
         new OutputTag<KinesisMessage>("leave-output") {};
-    
-    public static final OutputTag<KinesisMessage> FILE_PROCESSING_TAG = 
-        new OutputTag<KinesisMessage>("file-processing-output") {};
     
     public static final OutputTag<KinesisMessage> UNKNOWN_TAG = 
         new OutputTag<KinesisMessage>("unknown-output") {};
@@ -61,12 +58,6 @@ public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
                         LOG.debug("Routed to LEAVE_REQUEST pipeline");
                         break;
                         
-                    case "FILE_PROCESSING":
-                        message.setMessageType("FILE_PROCESSING");
-                        ctx.output(FILE_PROCESSING_TAG, message);
-                        LOG.debug("Routed to FILE_PROCESSING pipeline");
-                        break;
-                        
                     default:
                         message.setMessageType("UNKNOWN");
                         ctx.output(UNKNOWN_TAG, message);
@@ -85,10 +76,6 @@ public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
                     message.setMessageType("LEAVE_REQUEST");
                     ctx.output(LEAVE_TAG, message);
                     LOG.debug("Routed to LEAVE_REQUEST pipeline (by field detection)");
-                } else if (dataNode.has("fileName")) {
-                    message.setMessageType("FILE_PROCESSING");
-                    ctx.output(FILE_PROCESSING_TAG, message);
-                    LOG.debug("Routed to FILE_PROCESSING pipeline (by field detection)");
                 } else {
                     message.setMessageType("UNKNOWN");
                     ctx.output(UNKNOWN_TAG, message);

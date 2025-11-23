@@ -35,14 +35,15 @@ log_error() {
 APP_NAME="datahose-app"
 # Auto-detect latest dynamic S3 buckets by prefix and creation date
 # Load bucket names from environment or config file
-if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$VISITS_INPUT_BUCKET" ] || [ -z "$VISITS_OUTPUT_BUCKET" ] || [ -z "$CLAIMS_OUTPUT_BUCKET" ] || [ -z "$LEAVEREQUESTS_OUTPUT_BUCKET" ] || [ -z "$DEFAULT_OUTPUT_BUCKET" ]; then
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$VISITS_INPUT_BUCKET" ] || [ -z "$VISITS_OUTPUT_BUCKET" ] || [ -z "$DEFAULT_OUTPUT_BUCKET" ]; then
     if [ -f "/tmp/flink-config.env" ]; then
         source /tmp/flink-config.env
     fi
 fi
-if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$VISITS_INPUT_BUCKET" ] || [ -z "$VISITS_OUTPUT_BUCKET" ] || [ -z "$CLAIMS_OUTPUT_BUCKET" ] || [ -z "$LEAVEREQUESTS_OUTPUT_BUCKET" ] || [ -z "$DEFAULT_OUTPUT_BUCKET" ]; then
+if [ -z "$STREAMING_APP_BUCKET" ] || [ -z "$VISITS_INPUT_BUCKET" ] || [ -z "$VISITS_OUTPUT_BUCKET" ] || [ -z "$DEFAULT_OUTPUT_BUCKET" ]; then
     echo -e "${RED}[ERROR]${NC} Required bucket variables not set. Please export them or source /tmp/flink-config.env from your deployment before running this script."
-    echo "Required: STREAMING_APP_BUCKET, VISITS_INPUT_BUCKET, VISITS_OUTPUT_BUCKET, CLAIMS_OUTPUT_BUCKET, LEAVEREQUESTS_OUTPUT_BUCKET, DEFAULT_OUTPUT_BUCKET"
+    echo "Required: STREAMING_APP_BUCKET, VISITS_INPUT_BUCKET, VISITS_OUTPUT_BUCKET, DEFAULT_OUTPUT_BUCKET, ICEBERG_WAREHOUSE_BUCKET"
+    echo "Note: Claims and Leave Requests use Iceberg warehouse (no separate output buckets)"
     exit 1
 fi
 # Get region from AWS CLI default profile configuration
@@ -55,25 +56,35 @@ IAM_ROLE_NAME="${APP_NAME}-flink-role"
 IAM_POLICY_NAME="${APP_NAME}-flink-policy"
 USER_POLICY_NAME="${APP_NAME}-s3-upload-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
+LOG_STREAM_NAME="flink-application"
 KINESIS_STREAM_NAME="${APP_NAME}-stream"
+GLUE_DATABASE_NAME="${GLUE_DATABASE_NAME:-tm_data_lake}"
+# Extract bucket suffix for Athena results bucket if not provided
+if [ -z "$ATHENA_RESULTS_BUCKET" ]; then
+    BUCKET_SUFFIX=$(echo "$STREAMING_APP_BUCKET" | grep -oP '\d+-\d+$')
+    ATHENA_RESULTS_BUCKET="tm-athena-results-${BUCKET_SUFFIX}"
+fi
 
 log_warn "=============================================="
 log_warn "WARNING: This will destroy all infrastructure!"
 log_warn "=============================================="
 echo ""
 log_warn "Resources to be deleted:"
-echo "  - S3 Bucket: ${STREAMING_APP_BUCKET} (and all contents)"
+echo "  - Flink Application: ${APP_NAME}"
 echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
-echo "  - S3 Bucket: ${VISITS_INPUT_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${VISITS_OUTPUT_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${CLAIMS_OUTPUT_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${LEAVEREQUESTS_OUTPUT_BUCKET} (and all contents)"
-echo "  - S3 Bucket: ${DEFAULT_OUTPUT_BUCKET} (and all contents)"
+echo "  - S3 Bucket: ${STREAMING_APP_BUCKET} (and all contents/versions)"
+echo "  - S3 Bucket: ${VISITS_INPUT_BUCKET} (and all contents/versions)"
+echo "  - S3 Bucket: ${VISITS_OUTPUT_BUCKET} (and all contents/versions)"
+echo "  - S3 Bucket: ${DEFAULT_OUTPUT_BUCKET} (and all contents/versions)"
+echo "  - S3 Bucket: ${ICEBERG_WAREHOUSE_BUCKET} (Iceberg warehouse - and all contents/versions)"
+echo "  - S3 Bucket: ${ATHENA_RESULTS_BUCKET} (Athena results - and all contents)"
+echo "  - Glue Database: ${GLUE_DATABASE_NAME} (and all tables: claims, leave_requests)"
 echo "  - IAM Role: ${IAM_ROLE_NAME}"
 echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
 echo "  - IAM Policy (S3 Upload): ${USER_POLICY_NAME}"
 echo "  - CloudWatch Log Group: ${LOG_GROUP_NAME}"
-echo "  - Flink Application: ${APP_NAME}"
+echo "  - CloudWatch Log Stream: ${LOG_STREAM_NAME}"
+echo "  - NOTE: Claims/Leave data in Iceberg warehouse"
 echo ""
 
 # Prompt for confirmation (read from terminal explicitly)
@@ -238,9 +249,63 @@ delete_s3_bucket() {
 delete_s3_bucket "${STREAMING_APP_BUCKET}"
 delete_s3_bucket "${VISITS_INPUT_BUCKET}"
 delete_s3_bucket "${VISITS_OUTPUT_BUCKET}"
-delete_s3_bucket "${CLAIMS_OUTPUT_BUCKET}"
-delete_s3_bucket "${LEAVEREQUESTS_OUTPUT_BUCKET}"
 delete_s3_bucket "${DEFAULT_OUTPUT_BUCKET}"
+log_info "Claims and Leave Requests data stored in Iceberg warehouse (no separate output buckets)"
+
+# Delete Iceberg warehouse bucket (must be done BEFORE deleting Glue database)
+if [ -n "$ICEBERG_WAREHOUSE_BUCKET" ]; then
+    delete_s3_bucket "${ICEBERG_WAREHOUSE_BUCKET}"
+else
+    log_warn "ICEBERG_WAREHOUSE_BUCKET not set. Skipping Iceberg warehouse cleanup..."
+fi
+
+# Delete Athena results bucket
+if [ -n "$ATHENA_RESULTS_BUCKET" ]; then
+    delete_s3_bucket "${ATHENA_RESULTS_BUCKET}"
+else
+    log_warn "ATHENA_RESULTS_BUCKET not set. Skipping Athena results cleanup..."
+fi
+
+# Delete Glue Database and Tables for Iceberg
+if [ -n "$GLUE_DATABASE_NAME" ]; then
+    log_info "Deleting Glue Database: ${GLUE_DATABASE_NAME}..."
+    if aws glue get-database --name "${GLUE_DATABASE_NAME}" --region "${REGION}" &> /dev/null; then
+        # Delete specific Iceberg tables first
+        log_info "Deleting Iceberg table 'claims'..."
+        aws glue delete-table \
+            --database-name "${GLUE_DATABASE_NAME}" \
+            --name "claims" \
+            --region "${REGION}" 2>&1 || log_warn "Failed to delete table 'claims' or table does not exist"
+        
+        log_info "Deleting Iceberg table 'leave_requests'..."
+        aws glue delete-table \
+            --database-name "${GLUE_DATABASE_NAME}" \
+            --name "leave_requests" \
+            --region "${REGION}" 2>&1 || log_warn "Failed to delete table 'leave_requests' or table does not exist"
+        
+        # Delete any remaining tables in the database
+        TABLES=$(aws glue get-tables --database-name "${GLUE_DATABASE_NAME}" --region "${REGION}" --query 'TableList[].Name' --output text 2>/dev/null || echo "")
+        if [ -n "$TABLES" ]; then
+            log_info "Deleting remaining Glue tables: $TABLES"
+            for TABLE in $TABLES; do
+                aws glue delete-table \
+                    --database-name "${GLUE_DATABASE_NAME}" \
+                    --name "${TABLE}" \
+                    --region "${REGION}" 2>&1 || log_warn "Failed to delete table ${TABLE}"
+            done
+        fi
+        
+        # Delete the database
+        aws glue delete-database \
+            --name "${GLUE_DATABASE_NAME}" \
+            --region "${REGION}" 2>&1
+        log_info "Glue Database deleted successfully."
+    else
+        log_warn "Glue Database ${GLUE_DATABASE_NAME} not found. Skipping..."
+    fi
+else
+    log_warn "GLUE_DATABASE_NAME not set. Skipping Glue cleanup..."
+fi
 
 # Delete Kinesis Data Stream
 log_info "Deleting Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
@@ -337,16 +402,30 @@ if [ -f "/tmp/flink-config.env" ]; then
     log_info "Configuration file cleaned up."
 fi
 
+# Clean up temporary policy files (if any left over from iac_create.sh)
+rm -f /tmp/trust-policy.json /tmp/flink-policy.json /tmp/s3-upload-policy.json 2>/dev/null || true
+
 # Output summary
 log_info "=============================================="
 log_info "Infrastructure Destruction Complete!"
 log_info "=============================================="
 echo ""
 log_info "All resources have been removed:"
-echo "  ✓ S3 Buckets deleted (Application JAR, Visits Input, Visits Output, Claims Output, Leave Requests Output, Default Output)"
-echo "  ✓ Kinesis Data Stream deleted"
-echo "  ✓ IAM Role and Policies deleted"
-echo "  ✓ CloudWatch Log Group deleted"
-echo "  ✓ Flink Application deleted"
+echo "  ✓ Flink Application: ${APP_NAME}"
+echo "  ✓ Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
+echo "  ✓ S3 Buckets deleted (all versions and delete markers):"
+echo "    - Application JAR: ${STREAMING_APP_BUCKET}"
+echo "    - Visits Input: ${VISITS_INPUT_BUCKET}"
+echo "    - Visits Output: ${VISITS_OUTPUT_BUCKET}"
+echo "    - Default Output: ${DEFAULT_OUTPUT_BUCKET}"
+echo "    - Iceberg Warehouse: ${ICEBERG_WAREHOUSE_BUCKET} (contained Claims and Leave Requests)"
+echo "    - Athena Results: ${ATHENA_RESULTS_BUCKET}"
+echo "  ✓ Glue Database: ${GLUE_DATABASE_NAME} (with tables: claims, leave_requests)"
+echo "  ✓ IAM Role: ${IAM_ROLE_NAME}"
+echo "  ✓ IAM Policies deleted:"
+echo "    - Flink Policy: ${IAM_POLICY_NAME}"
+echo "    - S3 Upload Policy: ${USER_POLICY_NAME}"
+echo "  ✓ CloudWatch Log Group: ${LOG_GROUP_NAME}"
+echo "  ✓ Configuration files cleaned up"
 echo ""
-log_info "Cleanup completed successfully."
+log_info "Cleanup completed successfully. All resources created by iac_create.sh have been removed."

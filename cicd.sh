@@ -6,6 +6,9 @@
 
 set -e  # Exit on error
 
+# Disable AWS CLI pager to prevent interactive prompts
+export AWS_PAGER=""
+
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -41,8 +44,6 @@ APP_NAME="${APP_NAME:-datahose-app}"
 STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
 VISITS_INPUT_BUCKET="${VISITS_INPUT_BUCKET}"
 VISITS_OUTPUT_BUCKET="${VISITS_OUTPUT_BUCKET}"
-CLAIMS_OUTPUT_BUCKET="${CLAIMS_OUTPUT_BUCKET}"
-LEAVEREQUESTS_OUTPUT_BUCKET="${LEAVEREQUESTS_OUTPUT_BUCKET}"
 DEFAULT_OUTPUT_BUCKET="${DEFAULT_OUTPUT_BUCKET}"
 VISITS_INPUT_KEY="${VISITS_INPUT_KEY:-filefall/gymvisits.csv}"
 LOG_GROUP="${LOG_GROUP:-/aws/kinesis-analytics/${APP_NAME}}"
@@ -73,8 +74,9 @@ if [ -z "${VISITS_INPUT_BUCKET}" ]; then
     exit 1
 fi
 
-if [ -z "${VISITS_OUTPUT_BUCKET}" ] || [ -z "${CLAIMS_OUTPUT_BUCKET}" ] || [ -z "${LEAVEREQUESTS_OUTPUT_BUCKET}" ] || [ -z "${DEFAULT_OUTPUT_BUCKET}" ]; then
+if [ -z "${VISITS_OUTPUT_BUCKET}" ] || [ -z "${DEFAULT_OUTPUT_BUCKET}" ]; then
     log_error "One or more output buckets are not set. Please run iac_create.sh first and source the configuration."
+    log_error "Note: Claims and Leave Requests use Iceberg warehouse (no separate output buckets needed)"
     exit 1
 fi
 
@@ -93,14 +95,14 @@ echo "  - Application Bucket: ${STREAMING_APP_BUCKET}"
 echo "  - Visits Input Bucket: ${VISITS_INPUT_BUCKET}"
 echo "  - Visits Input Key: ${VISITS_INPUT_KEY}"
 echo "  - Visits Output Bucket: ${VISITS_OUTPUT_BUCKET}"
-echo "  - Claims Output Bucket: ${CLAIMS_OUTPUT_BUCKET}"
-echo "  - Leave Requests Output Bucket: ${LEAVEREQUESTS_OUTPUT_BUCKET}"
 echo "  - Default Output Bucket: ${DEFAULT_OUTPUT_BUCKET}"
 echo "  - Kinesis Stream: ${KINESIS_STREAM_NAME}"
+echo "  - Iceberg Warehouse: ${ICEBERG_WAREHOUSE_BUCKET}"
 echo "  - CloudWatch Logs: ${LOG_GROUP}"
 echo "  - Region: ${REGION}"
 echo "  - IAM Role ARN: ${FLINK_ROLE_ARN}"
 echo "  - Flink Version: ${FLINK_VERSION}"
+echo "  - NOTE: Claims/Leave data stored in Iceberg warehouse"
 echo ""
 
 # Check if AWS CLI is installed
@@ -281,14 +283,34 @@ if aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" 
                             \"visits-input-bucket\": \"${VISITS_INPUT_BUCKET}\",\
                             \"visits-input-key\": \"${VISITS_INPUT_KEY}\"\
                         }\
-                    },\
-                    {\
+                    },
+                    {
                         \"PropertyGroupId\": \"s3sink\",\
                         \"PropertyMap\": {\
                             \"visits-output-bucket\": \"${VISITS_OUTPUT_BUCKET}\",\
-                            \"claims-output-bucket\": \"${CLAIMS_OUTPUT_BUCKET}\",\
-                            \"leaverequests-output-bucket\": \"${LEAVEREQUESTS_OUTPUT_BUCKET}\",\
                             \"default-output-bucket\": \"${DEFAULT_OUTPUT_BUCKET}\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"IcebergClaims\",\
+                        \"PropertyMap\": {\
+                            \"bucket.prefix\": \"s3://${ICEBERG_WAREHOUSE_BUCKET}\",\
+                            \"catalog.db\": \"${GLUE_DATABASE_NAME}\",\
+                            \"catalog.table\": \"claims\",\
+                            \"partition.fields\": \"year,month,day,hour\",\
+                            \"operation\": \"append\",\
+                            \"write.format.default\": \"avro\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"IcebergLeave\",\
+                        \"PropertyMap\": {\
+                            \"bucket.prefix\": \"s3://${ICEBERG_WAREHOUSE_BUCKET}\",\
+                            \"catalog.db\": \"${GLUE_DATABASE_NAME}\",\
+                            \"catalog.table\": \"leave_requests\",\
+                            \"partition.fields\": \"year,month,day,hour\",\
+                            \"operation\": \"append\",\
+                            \"write.format.default\": \"avro\"\
                         }\
                     }\
                 ]\
@@ -353,9 +375,27 @@ else
                         \"PropertyGroupId\": \"s3sink\",\
                         \"PropertyMap\": {\
                             \"visits-output-bucket\": \"${VISITS_OUTPUT_BUCKET}\",\
-                            \"claims-output-bucket\": \"${CLAIMS_OUTPUT_BUCKET}\",\
-                            \"leaverequests-output-bucket\": \"${LEAVEREQUESTS_OUTPUT_BUCKET}\",\
                             \"default-output-bucket\": \"${DEFAULT_OUTPUT_BUCKET}\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"IcebergClaims\",\
+                        \"PropertyMap\": {\
+                            \"bucket.prefix\": \"s3://${ICEBERG_WAREHOUSE_BUCKET}\",\
+                            \"catalog.db\": \"${GLUE_DATABASE_NAME}\",\
+                            \"catalog.table\": \"claims\",\
+                            \"partition.fields\": \"year,month,day,hour\",\
+                            \"operation\": \"append\"\
+                        }\
+                    },\
+                    {\
+                        \"PropertyGroupId\": \"IcebergLeave\",\
+                        \"PropertyMap\": {\
+                            \"bucket.prefix\": \"s3://${ICEBERG_WAREHOUSE_BUCKET}\",\
+                            \"catalog.db\": \"${GLUE_DATABASE_NAME}\",\
+                            \"catalog.table\": \"leave_requests\",\
+                            \"partition.fields\": \"year,month,day,hour\",\
+                            \"operation\": \"append\"\
                         }\
                     }\
                 ]\
@@ -493,9 +533,8 @@ echo "  - Application Code: s3://${STREAMING_APP_BUCKET}/${S3_JAR_KEY}"
 echo "  - Kinesis Stream: ${KINESIS_STREAM_NAME}"
 echo "  - Visits Input: s3://${VISITS_INPUT_BUCKET}/${VISITS_INPUT_KEY}"
 echo "  - Visits Output: s3://${VISITS_OUTPUT_BUCKET}/"
-echo "  - Claims Output: s3://${CLAIMS_OUTPUT_BUCKET}/"
-echo "  - Leave Requests Output: s3://${LEAVEREQUESTS_OUTPUT_BUCKET}/"
 echo "  - Default Output: s3://${DEFAULT_OUTPUT_BUCKET}/"
+echo "  - Iceberg Warehouse: s3://${ICEBERG_WAREHOUSE_BUCKET}/ (Claims and Leave Requests)"
 echo "  - CloudWatch Logs: ${LOG_GROUP}"
 echo ""
 log_info "Monitoring Commands:"
@@ -511,19 +550,20 @@ echo ""
 echo "  - List visits output:"
 echo "    aws s3 ls s3://${VISITS_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
 echo ""
-echo "  - List claims output:"
-echo "    aws s3 ls s3://${CLAIMS_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
-echo ""
-echo "  - List leave requests output:"
-echo "    aws s3 ls s3://${LEAVEREQUESTS_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
-echo ""
-echo "  - List default output:"
+echo "  - List default/unknown output:"
 echo "    aws s3 ls s3://${DEFAULT_OUTPUT_BUCKET}/ --recursive --region ${REGION}"
 echo ""
-echo "  - Download all output files:"
+echo "  - List Iceberg warehouse (Claims and Leave Requests):"
+echo "    aws s3 ls s3://${ICEBERG_WAREHOUSE_BUCKET}/ --recursive --region ${REGION}"
+echo ""
+echo "  - Query Claims via Athena:"
+echo "    SELECT * FROM ${GLUE_DATABASE_NAME}.claims LIMIT 10;"
+echo ""
+echo "  - Query Leave Requests via Athena:"
+echo "    SELECT * FROM ${GLUE_DATABASE_NAME}.leave_requests LIMIT 10;"
+echo ""
+echo "  - Download output files:"
 echo "    aws s3 sync s3://${VISITS_OUTPUT_BUCKET}/ ./output/visits/ --region ${REGION}"
-echo "    aws s3 sync s3://${CLAIMS_OUTPUT_BUCKET}/ ./output/claims/ --region ${REGION}"
-echo "    aws s3 sync s3://${LEAVEREQUESTS_OUTPUT_BUCKET}/ ./output/leaverequests/ --region ${REGION}"
 echo "    aws s3 sync s3://${DEFAULT_OUTPUT_BUCKET}/ ./output/default/ --region ${REGION}"
 echo ""
 log_info "To stop the application:"

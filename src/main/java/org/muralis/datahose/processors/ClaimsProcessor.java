@@ -49,16 +49,26 @@ public class ClaimsProcessor extends RichFlatMapFunction<KinesisMessage, Claim> 
             
             // Extract fields and create Avro Claim
             String claimId = dataNode.get("claimId").asText();
-            String status = dataNode.get("status").asText();
-            double amount = dataNode.get("amount").asDouble();
-            String processedAt = dataNode.get("processedAt").asText();
+            String claimStatus = dataNode.get("status").asText();
+            double claimAmount = dataNode.get("amount").asDouble();
+            String claimDate = dataNode.get("processedAt").asText();
             
-            // Create Avro Claim using builder pattern
+            // Generate timestamp and partition fields
+            long eventTimestamp = System.currentTimeMillis();
+            java.time.ZonedDateTime zdt = java.time.Instant.ofEpochMilli(eventTimestamp)
+                .atZone(java.time.ZoneId.of("UTC"));
+            
+            // Create Avro Claim using builder pattern with all fields
             Claim claim = Claim.newBuilder()
                 .setClaimId(claimId)
-                .setStatus(status)
-                .setAmount(amount)
-                .setProcessedAt(processedAt)
+                .setClaimAmount(claimAmount)
+                .setClaimDate(claimDate)
+                .setClaimStatus(claimStatus)
+                .setEventTimestamp(eventTimestamp)
+                .setYear(zdt.getYear())
+                .setMonth(zdt.getMonthValue())
+                .setDay(zdt.getDayOfMonth())
+                .setHour(zdt.getHour())
                 .build();
             
             out.collect(claim);
@@ -66,7 +76,8 @@ public class ClaimsProcessor extends RichFlatMapFunction<KinesisMessage, Claim> 
             
         } catch (Exception e) {
             LOG.error("Error processing Claim JSON: {}", e.getMessage(), e);
-            throw e;
+            // Do not re-throw - let message be handled by error handling
+            // Flink will continue processing other messages
         }
     }
 }

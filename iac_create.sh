@@ -34,12 +34,14 @@ APP_NAME="datahose-app"
 STREAMING_APP_BUCKET="tm-streaming-app-bucket-${BUCKET_SUFFIX}"
 VISITS_INPUT_BUCKET="tm-visits-input-${BUCKET_SUFFIX}"
 VISITS_OUTPUT_BUCKET="tm-visits-output-${BUCKET_SUFFIX}"
-CLAIMS_OUTPUT_BUCKET="tm-claims-output-${BUCKET_SUFFIX}"
-LEAVEREQUESTS_OUTPUT_BUCKET="tm-leaverequests-output-${BUCKET_SUFFIX}"
 DEFAULT_OUTPUT_BUCKET="tm-output-${BUCKET_SUFFIX}"
 VISITS_INPUT_KEY="filefall/gymvisits.csv"
 KINESIS_STREAM_NAME="${APP_NAME}-stream"
 KINESIS_SHARD_COUNT=1
+GLUE_DATABASE_NAME="tm_data_lake"
+ICEBERG_WAREHOUSE_BUCKET="tm-iceberg-warehouse-${BUCKET_SUFFIX}"
+ATHENA_RESULTS_BUCKET="tm-athena-results-${BUCKET_SUFFIX}"
+# Claims and Leave Requests data stored in Iceberg warehouse (no separate output buckets needed)
 
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
@@ -136,41 +138,9 @@ else
     log_warn "Bucket ${VISITS_OUTPUT_BUCKET} already exists."
 fi
 
-# Create S3 bucket for claims output data
-log_info "Creating S3 bucket for claims output data: ${CLAIMS_OUTPUT_BUCKET}..."
-if aws s3 ls "s3://${CLAIMS_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
-    aws s3api create-bucket \
-        --bucket "${CLAIMS_OUTPUT_BUCKET}" \
-        --region "${REGION}" \
-        --create-bucket-configuration LocationConstraint="${REGION}"
-    
-    # Enable versioning
-    aws s3api put-bucket-versioning \
-        --bucket "${CLAIMS_OUTPUT_BUCKET}" \
-        --versioning-configuration Status=Enabled
-    
-    log_info "Bucket ${CLAIMS_OUTPUT_BUCKET} created successfully."
-else
-    log_warn "Bucket ${CLAIMS_OUTPUT_BUCKET} already exists."
-fi
+# Claims output bucket removed - Iceberg handles claims data
 
-# Create S3 bucket for leave requests output data
-log_info "Creating S3 bucket for leave requests output data: ${LEAVEREQUESTS_OUTPUT_BUCKET}..."
-if aws s3 ls "s3://${LEAVEREQUESTS_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
-    aws s3api create-bucket \
-        --bucket "${LEAVEREQUESTS_OUTPUT_BUCKET}" \
-        --region "${REGION}" \
-        --create-bucket-configuration LocationConstraint="${REGION}"
-    
-    # Enable versioning
-    aws s3api put-bucket-versioning \
-        --bucket "${LEAVEREQUESTS_OUTPUT_BUCKET}" \
-        --versioning-configuration Status=Enabled
-    
-    log_info "Bucket ${LEAVEREQUESTS_OUTPUT_BUCKET} created successfully."
-else
-    log_warn "Bucket ${LEAVEREQUESTS_OUTPUT_BUCKET} already exists."
-fi
+# Leave requests output bucket removed - Iceberg handles leave_requests data
 
 # Create S3 bucket for default output data (unknown messages)
 log_info "Creating S3 bucket for default output data: ${DEFAULT_OUTPUT_BUCKET}..."
@@ -189,6 +159,52 @@ if aws s3 ls "s3://${DEFAULT_OUTPUT_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
 else
     log_warn "Bucket ${DEFAULT_OUTPUT_BUCKET} already exists."
 fi
+
+# Create S3 bucket for Iceberg warehouse
+log_info "Creating S3 bucket for Iceberg warehouse: ${ICEBERG_WAREHOUSE_BUCKET}..."
+if aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}" 2>&1 | grep -q 'NoSuchBucket'; then
+    aws s3api create-bucket \
+        --bucket "${ICEBERG_WAREHOUSE_BUCKET}" \
+        --region "${REGION}" \
+        --create-bucket-configuration LocationConstraint="${REGION}"
+    
+    # Enable versioning
+    aws s3api put-bucket-versioning \
+        --bucket "${ICEBERG_WAREHOUSE_BUCKET}" \
+        --versioning-configuration Status=Enabled
+    
+    log_info "Bucket ${ICEBERG_WAREHOUSE_BUCKET} created successfully."
+else
+    log_warn "Bucket ${ICEBERG_WAREHOUSE_BUCKET} already exists."
+fi
+
+# Create Glue Database for Iceberg tables
+log_info "Creating Glue Database: ${GLUE_DATABASE_NAME}..."
+if aws glue get-database --name "${GLUE_DATABASE_NAME}" --region "${REGION}" &> /dev/null; then
+    log_warn "Glue database ${GLUE_DATABASE_NAME} already exists."
+else
+    aws glue create-database \
+        --database-input "{
+            \"Name\": \"${GLUE_DATABASE_NAME}\",
+            \"Description\": \"Glue database for Iceberg tables - ${APP_NAME}\",
+            \"LocationUri\": \"s3://${ICEBERG_WAREHOUSE_BUCKET}/\"
+        }" \
+        --region "${REGION}"
+    
+    log_info "Glue Database created successfully: ${GLUE_DATABASE_NAME}"
+fi
+
+# Create Athena results bucket for query execution
+log_info "Creating Athena results bucket: ${ATHENA_RESULTS_BUCKET}..."
+if aws s3 ls "s3://${ATHENA_RESULTS_BUCKET}" --region "${REGION}" &> /dev/null; then
+    log_warn "Athena results bucket ${ATHENA_RESULTS_BUCKET} already exists."
+else
+    aws s3 mb "s3://${ATHENA_RESULTS_BUCKET}" --region "${REGION}"
+    log_info "Athena results bucket created successfully."
+fi
+
+log_info "Iceberg tables will be created automatically by Flink application on first write."
+log_info "Tables: claims, leave_requests in database: ${GLUE_DATABASE_NAME}"
 
 # Create Kinesis Data Stream
 log_info "Creating Kinesis Data Stream: ${KINESIS_STREAM_NAME}..."
@@ -327,38 +343,7 @@ cat > /tmp/flink-policy.json <<EOF
         "arn:aws:s3:::${VISITS_OUTPUT_BUCKET}/*"
       ]
     },
-    {
-      "Sid": "WriteToClaimsOutputBucket",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:GetObject",
-        "s3:GetObjectVersion",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::${CLAIMS_OUTPUT_BUCKET}",
-        "arn:aws:s3:::${CLAIMS_OUTPUT_BUCKET}/*"
-      ]
-    },
-    {
-      "Sid": "WriteToLeaveRequestsOutputBucket",
-      "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:GetObject",
-        "s3:GetObjectVersion",
-        "s3:ListBucket",
-        "s3:GetBucketLocation"
-      ],
-      "Resource": [
-        "arn:aws:s3:::${LEAVEREQUESTS_OUTPUT_BUCKET}",
-        "arn:aws:s3:::${LEAVEREQUESTS_OUTPUT_BUCKET}/*"
-      ]
-    },
+
     {
       "Sid": "WriteToDefaultOutputBucket",
       "Effect": "Allow",
@@ -410,6 +395,46 @@ cat > /tmp/flink-policy.json <<EOF
         "cloudwatch:PutMetricData"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "GlueCatalogAccess",
+      "Effect": "Allow",
+      "Action": [
+        "glue:GetDatabase",
+        "glue:GetTable",
+        "glue:GetTables",
+        "glue:CreateTable",
+        "glue:UpdateTable",
+        "glue:DeleteTable",
+        "glue:BatchGetPartition",
+        "glue:GetPartition",
+        "glue:GetPartitions",
+        "glue:CreatePartition",
+        "glue:BatchCreatePartition",
+        "glue:UpdatePartition",
+        "glue:DeletePartition"
+      ],
+      "Resource": [
+        "arn:aws:glue:${REGION}:${ACCOUNT_ID}:catalog",
+        "arn:aws:glue:${REGION}:${ACCOUNT_ID}:database/${GLUE_DATABASE_NAME}",
+        "arn:aws:glue:${REGION}:${ACCOUNT_ID}:table/${GLUE_DATABASE_NAME}/*"
+      ]
+    },
+    {
+      "Sid": "IcebergWarehouseAccess",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${ICEBERG_WAREHOUSE_BUCKET}",
+        "arn:aws:s3:::${ICEBERG_WAREHOUSE_BUCKET}/*"
+      ]
     },
     {
       "Sid": "VPCAccess",
@@ -542,10 +567,11 @@ echo "  - S3 Bucket (Application JAR): ${STREAMING_APP_BUCKET}"
 echo "  - Kinesis Data Stream: ${KINESIS_STREAM_NAME}"
 echo "  - S3 Bucket (Visits Input): ${VISITS_INPUT_BUCKET}"
 echo "  - S3 Bucket (Visits Output): ${VISITS_OUTPUT_BUCKET}"
-echo "  - S3 Bucket (Claims Output): ${CLAIMS_OUTPUT_BUCKET}"
-echo "  - S3 Bucket (Leave Requests Output): ${LEAVEREQUESTS_OUTPUT_BUCKET}"
-echo "  - S3 Bucket (Default Output): ${DEFAULT_OUTPUT_BUCKET}"
+echo "  - S3 Bucket (Default/Unknown Output): ${DEFAULT_OUTPUT_BUCKET}"
+echo "  - S3 Bucket (Iceberg Warehouse): ${ICEBERG_WAREHOUSE_BUCKET}"
+echo "  - Glue Database (Iceberg): ${GLUE_DATABASE_NAME}"
 echo "  - Visits Input Key: ${VISITS_INPUT_KEY}"
+echo "  - NOTE: Claims and Leave Requests data stored in Iceberg warehouse"
 echo "  - IAM Role (Flink): ${IAM_ROLE_NAME}"
 echo "  - IAM Role ARN: ${ROLE_ARN}"
 echo "  - IAM Policy (Flink): ${IAM_POLICY_NAME}"
@@ -561,13 +587,14 @@ echo "export STREAMING_APP_BUCKET=\"${STREAMING_APP_BUCKET}\""
 echo "export KINESIS_STREAM_NAME=\"${KINESIS_STREAM_NAME}\""
 echo "export VISITS_INPUT_BUCKET=\"${VISITS_INPUT_BUCKET}\""
 echo "export VISITS_OUTPUT_BUCKET=\"${VISITS_OUTPUT_BUCKET}\""
-echo "export CLAIMS_OUTPUT_BUCKET=\"${CLAIMS_OUTPUT_BUCKET}\""
-echo "export LEAVEREQUESTS_OUTPUT_BUCKET=\"${LEAVEREQUESTS_OUTPUT_BUCKET}\""
 echo "export DEFAULT_OUTPUT_BUCKET=\"${DEFAULT_OUTPUT_BUCKET}\""
+echo "export ICEBERG_WAREHOUSE_BUCKET=\"${ICEBERG_WAREHOUSE_BUCKET}\""
+echo "export GLUE_DATABASE_NAME=\"${GLUE_DATABASE_NAME}\""
 echo "export VISITS_INPUT_KEY=\"${VISITS_INPUT_KEY}\""
 echo "export LOG_GROUP=\"${LOG_GROUP_NAME}\""
 echo "export LOG_STREAM=\"${LOG_STREAM_NAME}\""
 echo "export BUCKET_SUFFIX=\"${BUCKET_SUFFIX}\""
+echo "# Claims and Leave Requests use Iceberg warehouse bucket"
 echo ""
 
 # Save configuration to file
@@ -578,15 +605,16 @@ export STREAMING_APP_BUCKET="${STREAMING_APP_BUCKET}"
 export KINESIS_STREAM_NAME="${KINESIS_STREAM_NAME}"
 export VISITS_INPUT_BUCKET="${VISITS_INPUT_BUCKET}"
 export VISITS_OUTPUT_BUCKET="${VISITS_OUTPUT_BUCKET}"
-export CLAIMS_OUTPUT_BUCKET="${CLAIMS_OUTPUT_BUCKET}"
-export LEAVEREQUESTS_OUTPUT_BUCKET="${LEAVEREQUESTS_OUTPUT_BUCKET}"
 export DEFAULT_OUTPUT_BUCKET="${DEFAULT_OUTPUT_BUCKET}"
+export ICEBERG_WAREHOUSE_BUCKET="${ICEBERG_WAREHOUSE_BUCKET}"
+export GLUE_DATABASE_NAME="${GLUE_DATABASE_NAME}"
 export VISITS_INPUT_KEY="${VISITS_INPUT_KEY}"
 export LOG_GROUP="${LOG_GROUP_NAME}"
 export LOG_STREAM="${LOG_STREAM_NAME}"
 export APP_NAME="${APP_NAME}"
 export REGION="${REGION}"
 export BUCKET_SUFFIX="${BUCKET_SUFFIX}"
+# Claims and Leave Requests use Iceberg warehouse bucket
 EOF
 
 log_info "Configuration saved to /tmp/flink-config.env"

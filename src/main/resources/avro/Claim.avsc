@@ -10,19 +10,44 @@
       "doc": "Unique claim identifier"
     },
     {
-      "name": "status",
-      "type": "string",
-      "doc": "Claim status (e.g., Approved, Pending, Denied)"
-    },
-    {
-      "name": "amount",
+      "name": "claimAmount",
       "type": "double",
       "doc": "Claim amount"
     },
     {
-      "name": "processedAt",
+      "name": "claimDate",
       "type": "string",
-      "doc": "Timestamp when the claim was processed"
+      "doc": "Date of the claim"
+    },
+    {
+      "name": "claimStatus",
+      "type": "string",
+      "doc": "Claim status (e.g., Approved, Pending, Denied)"
+    },
+    {
+      "name": "eventTimestamp",
+      "type": "long",
+      "doc": "Event timestamp in milliseconds"
+    },
+    {
+      "name": "year",
+      "type": "int",
+      "doc": "Partition field: year"
+    },
+    {
+      "name": "month",
+      "type": "int",
+      "doc": "Partition field: month"
+    },
+    {
+      "name": "day",
+      "type": "int",
+      "doc": "Partition field: day"
+    },
+    {
+      "name": "hour",
+      "type": "int",
+      "doc": "Partition field: hour"
     }
   ]
 }

@@ -21,10 +21,9 @@ log_section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 APP_NAME="${APP_NAME:-datahose-app}"
 # Auto-detect latest dynamic S3 buckets by prefix and creation date
 STREAMING_APP_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-streaming-app-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
-INPUT_DATA_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-input-data-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
-OUTPUT_DATA_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-output-data-bucket-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
-INPUT_TABLE_NAME="datafall"
-OUTPUT_TABLE_NAME="datalake"
+ICEBERG_WAREHOUSE_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-iceberg-warehouse-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
+DEFAULT_OUTPUT_BUCKET=$(aws s3api list-buckets --query 'Buckets[?starts_with(Name, `tm-output-`)] | sort_by(@, &CreationDate)[-1].Name' --output text)
+GLUE_DATABASE_NAME="tm_data_lake"
 # Get region from AWS CLI default profile configuration
 REGION=$(aws configure get region 2>/dev/null)
 if [ -z "$REGION" ]; then
@@ -32,8 +31,8 @@ if [ -z "$REGION" ]; then
     exit 1
 fi
 IAM_ROLE_NAME="${APP_NAME}-flink-role"
-USER_POLICY_NAME="${APP_NAME}-s3-upload-policy"
 LOG_GROUP_NAME="/aws/kinesis-analytics/${APP_NAME}"
+KINESIS_STREAM_NAME="datahose-app-stream"
 
 echo "╔════════════════════════════════════════════════════════╗"
 echo "║     Flink Application Verification Report             ║"
@@ -73,47 +72,53 @@ else
     log_error "Application bucket not found: ${STREAMING_APP_BUCKET}"
 fi
 
-if [ -n "${INPUT_DATA_BUCKET}" ] && aws s3 ls "s3://${INPUT_DATA_BUCKET}" &> /dev/null; then
-    log_info "Input data bucket exists: ${INPUT_DATA_BUCKET}"
-    if aws s3 ls "s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/" &> /dev/null; then
-        log_info "Input table folder exists: ${INPUT_TABLE_NAME}"
-        FILE_COUNT=$(aws s3 ls "s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/" --recursive --region "${REGION}" | wc -l)
-        log_info "Files in input table: ${FILE_COUNT}"
-        if [ ${FILE_COUNT} -gt 0 ]; then
-            echo ""
-            echo "    Recent files:"
-            aws s3 ls "s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/" --recursive --region "${REGION}" | tail -5 | sed 's/^/    /'
-        fi
-    else
-        log_warn "Input table folder not found: ${INPUT_TABLE_NAME}"
+if [ -n "${ICEBERG_WAREHOUSE_BUCKET}" ] && aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}" &> /dev/null; then
+    log_info "Iceberg warehouse exists: ${ICEBERG_WAREHOUSE_BUCKET}"
+    
+    # Check for claims and leave_requests folders
+    if aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}/claims/" &> /dev/null; then
+        CLAIMS_FILES=$(aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}/claims/" --recursive --region "${REGION}" | wc -l)
+        log_info "Claims table files: ${CLAIMS_FILES}"
+    fi
+    
+    if aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}/leave_requests/" &> /dev/null; then
+        LEAVE_FILES=$(aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}/leave_requests/" --recursive --region "${REGION}" | wc -l)
+        log_info "Leave requests table files: ${LEAVE_FILES}"
     fi
 else
-    log_error "Input data bucket not found: ${INPUT_DATA_BUCKET}"
+    log_error "Iceberg warehouse not found: ${ICEBERG_WAREHOUSE_BUCKET}"
 fi
 
-if [ -n "${OUTPUT_DATA_BUCKET}" ] && aws s3 ls "s3://${OUTPUT_DATA_BUCKET}" &> /dev/null; then
-    log_info "Output data bucket exists: ${OUTPUT_DATA_BUCKET}"
-    if aws s3 ls "s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/" &> /dev/null; then
-        log_info "Output table folder exists: ${OUTPUT_TABLE_NAME}"
-        FILE_COUNT=$(aws s3 ls "s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/" --recursive --region "${REGION}" | wc -l)
-        log_info "Files in output table: ${FILE_COUNT}"
-        if [ ${FILE_COUNT} -gt 0 ]; then
-            echo ""
-            echo "    Recent files:"
-            aws s3 ls "s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/" --recursive --region "${REGION}" | tail -5 | sed 's/^/    /'
-        fi
-    else
-        log_warn "Output table folder not found: ${OUTPUT_TABLE_NAME}"
-    fi
+if [ -n "${DEFAULT_OUTPUT_BUCKET}" ] && aws s3 ls "s3://${DEFAULT_OUTPUT_BUCKET}" &> /dev/null; then
+    log_info "Default output bucket exists: ${DEFAULT_OUTPUT_BUCKET}"
 else
-    log_error "Output data bucket not found: ${OUTPUT_DATA_BUCKET}"
+    log_warn "Default output bucket not found: ${DEFAULT_OUTPUT_BUCKET}"
 fi
 
-# Kinesis Data Stream is no longer used in S3-to-S3 architecture
+# Data Streaming Architecture
 log_section "Data Streaming Architecture"
-log_info "Architecture: S3-to-S3 (File-based streaming)"
-log_info "Input: ${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/"
-log_info "Output: ${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/"
+log_info "Architecture: Kinesis → Flink → Iceberg (Data Lake)"
+if aws kinesis describe-stream --stream-name "${KINESIS_STREAM_NAME}" --region "${REGION}" &> /dev/null; then
+    log_info "Kinesis Stream: ${KINESIS_STREAM_NAME} ✓"
+else
+    log_warn "Kinesis Stream not found: ${KINESIS_STREAM_NAME}"
+fi
+
+# Check Glue Catalog
+log_section "Glue Catalog"
+if aws glue get-database --name "${GLUE_DATABASE_NAME}" --region "${REGION}" &> /dev/null; then
+    log_info "Glue database exists: ${GLUE_DATABASE_NAME}"
+    
+    # List tables
+    TABLES=$(aws glue get-tables --database-name "${GLUE_DATABASE_NAME}" --region "${REGION}" --query 'TableList[*].Name' --output text)
+    if [ -n "${TABLES}" ]; then
+        log_info "Tables: ${TABLES}"
+    else
+        log_warn "No tables found in database"
+    fi
+else
+    log_error "Glue database not found: ${GLUE_DATABASE_NAME}"
+fi
 
 # Check IAM Role
 log_section "IAM Resources"
@@ -127,25 +132,6 @@ if aws iam get-role --role-name "${IAM_ROLE_NAME}" &> /dev/null; then
     log_info "Attached policies: ${POLICY_COUNT}"
 else
     log_error "IAM Role not found: ${IAM_ROLE_NAME}"
-fi
-
-# Check user policy for Kinesis producer
-USER_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${USER_POLICY_NAME}"
-if aws iam get-policy --policy-arn "${USER_POLICY_ARN}" &> /dev/null; then
-    log_info "User policy exists: ${USER_POLICY_NAME}"
-    
-    # Check if attached to user sunny0524
-    if aws iam get-user --user-name sunny0524 &> /dev/null; then
-        if aws iam list-attached-user-policies --user-name sunny0524 --query "AttachedPolicies[?PolicyArn=='${USER_POLICY_ARN}']" --output text | grep -q "${USER_POLICY_NAME}"; then
-            log_info "Policy attached to user sunny0524 ✓"
-        else
-            log_warn "Policy NOT attached to user sunny0524"
-        fi
-    else
-        log_warn "User sunny0524 not found"
-    fi
-else
-    log_warn "User policy not found: ${USER_POLICY_NAME}"
 fi
 
 # Check CloudWatch Logs
@@ -214,8 +200,8 @@ TOTAL_CHECKS=7
 PASSED=0
 
 aws s3 ls "s3://${STREAMING_APP_BUCKET}" &> /dev/null && ((PASSED++))
-aws s3 ls "s3://${INPUT_DATA_BUCKET}" &> /dev/null && ((PASSED++))
-aws s3 ls "s3://${OUTPUT_DATA_BUCKET}" &> /dev/null && ((PASSED++))
+aws s3 ls "s3://${ICEBERG_WAREHOUSE_BUCKET}" &> /dev/null && ((PASSED++))
+aws glue get-database --name "${GLUE_DATABASE_NAME}" --region "${REGION}" &> /dev/null && ((PASSED++))
 aws iam get-role --role-name "${IAM_ROLE_NAME}" &> /dev/null && ((PASSED++))
 aws logs describe-log-groups --log-group-name-prefix "${LOG_GROUP_NAME}" --region "${REGION}" | grep -q "${LOG_GROUP_NAME}" && ((PASSED++))
 aws kinesisanalyticsv2 describe-application --application-name "${APP_NAME}" --region "${REGION}" &> /dev/null && ((PASSED++))
@@ -230,9 +216,8 @@ if [ ${PASSED} -eq ${TOTAL_CHECKS} ]; then
     echo ""
     echo "Useful commands:"
     echo "  - View live logs: aws logs tail ${LOG_GROUP_NAME} --follow --region ${REGION}"
-    echo "  - List input files: aws s3 ls s3://${INPUT_DATA_BUCKET}/${INPUT_TABLE_NAME}/ --recursive --region ${REGION}"
-    echo "  - List output files: aws s3 ls s3://${OUTPUT_DATA_BUCKET}/${OUTPUT_TABLE_NAME}/ --recursive --region ${REGION}"
-    echo "  - Upload test data: ./test.sh"
+    echo "  - Send test data: ./test.sh"
+    echo "  - Query data: Use Athena to query tm_data_lake.claims and tm_data_lake.leave_requests"
     echo "  - Stop app: aws kinesisanalyticsv2 stop-application --application-name ${APP_NAME} --region ${REGION}"
     exit 0
 elif [ ${PASSED} -ge 5 ]; then
