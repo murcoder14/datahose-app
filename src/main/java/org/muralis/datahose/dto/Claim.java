@@ -19,9 +19,4 @@ public class Claim implements Serializable {
     private String status;
     private double amount;
     private String processedAt;
-
-    @Override
-    public String toString() {
-        return claimId + "," + status + "," + amount + "," + processedAt;
-    }
 }

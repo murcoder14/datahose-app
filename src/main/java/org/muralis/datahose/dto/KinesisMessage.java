@@ -50,15 +50,4 @@ public class KinesisMessage implements Serializable {
             return MessageType.UNKNOWN;
         }
     }
-
-    @Override
-    public String toString() {
-        return "KinesisMessage{" +
-                "messageType='" + messageType + '\'' +
-                ", s3Bucket='" + s3Bucket + '\'' +
-                ", s3Key='" + s3Key + '\'' +
-                ", timestamp=" + timestamp +
-                ", metadata='" + metadata + '\'' +
-                '}';
-    }
 }

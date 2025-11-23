@@ -19,6 +19,18 @@ public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
     
     private final ObjectMapper objectMapper = new ObjectMapper();
     
+    // Message type constants
+    private static final String MSG_TYPE_CLAIM = "CLAIM";
+    private static final String MSG_TYPE_LEAVE_REQUEST = "LEAVE_REQUEST";
+    private static final String MSG_TYPE_UNKNOWN = "UNKNOWN";
+    private static final String MSG_TYPE_PARSE_ERROR = "PARSE_ERROR";
+    
+    // Field names for message detection
+    private static final String FIELD_MESSAGE_TYPE = "messageType";
+    private static final String FIELD_DATA = "data";
+    private static final String FIELD_CLAIM_ID = "claimId";
+    private static final String FIELD_EMPLOYEE_ID = "employeeId";
+    
     // Define side output tags for each message type (Claims and Leave Requests only)
     public static final OutputTag<KinesisMessage> CLAIMS_TAG = 
         new OutputTag<KinesisMessage>("claims-output") {};
@@ -42,42 +54,42 @@ public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
             message.setMetadata(value);  // Store the entire JSON payload
             
             // Check for messageType field first
-            if (jsonNode.has("messageType")) {
-                String messageType = jsonNode.get("messageType").asText();
+            if (jsonNode.has(FIELD_MESSAGE_TYPE)) {
+                String messageType = jsonNode.get(FIELD_MESSAGE_TYPE).asText();
                 
                 switch (messageType) {
-                    case "CLAIM":
-                        message.setMessageType("CLAIM");
+                    case MSG_TYPE_CLAIM:
+                        message.setMessageType(MSG_TYPE_CLAIM);
                         ctx.output(CLAIMS_TAG, message);
                         LOG.debug("Routed to CLAIMS pipeline");
                         break;
                         
-                    case "LEAVE_REQUEST":
-                        message.setMessageType("LEAVE_REQUEST");
+                    case MSG_TYPE_LEAVE_REQUEST:
+                        message.setMessageType(MSG_TYPE_LEAVE_REQUEST);
                         ctx.output(LEAVE_TAG, message);
                         LOG.debug("Routed to LEAVE_REQUEST pipeline");
                         break;
                         
                     default:
-                        message.setMessageType("UNKNOWN");
+                        message.setMessageType(MSG_TYPE_UNKNOWN);
                         ctx.output(UNKNOWN_TAG, message);
                         LOG.warn("Unknown message type: {}", messageType);
                         break;
                 }
             } else {
                 // Fallback: check for specific fields in data
-                JsonNode dataNode = jsonNode.has("data") ? jsonNode.get("data") : jsonNode;
+                JsonNode dataNode = jsonNode.has(FIELD_DATA) ? jsonNode.get(FIELD_DATA) : jsonNode;
                 
-                if (dataNode.has("claimId")) {
-                    message.setMessageType("CLAIM");
+                if (dataNode.has(FIELD_CLAIM_ID)) {
+                    message.setMessageType(MSG_TYPE_CLAIM);
                     ctx.output(CLAIMS_TAG, message);
                     LOG.debug("Routed to CLAIMS pipeline (by field detection)");
-                } else if (dataNode.has("employeeId")) {
-                    message.setMessageType("LEAVE_REQUEST");
+                } else if (dataNode.has(FIELD_EMPLOYEE_ID)) {
+                    message.setMessageType(MSG_TYPE_LEAVE_REQUEST);
                     ctx.output(LEAVE_TAG, message);
                     LOG.debug("Routed to LEAVE_REQUEST pipeline (by field detection)");
                 } else {
-                    message.setMessageType("UNKNOWN");
+                    message.setMessageType(MSG_TYPE_UNKNOWN);
                     ctx.output(UNKNOWN_TAG, message);
                     LOG.warn("Unknown message type - no matching fields found");
                 }
@@ -87,7 +99,7 @@ public class MessageRouter extends ProcessFunction<String, KinesisMessage> {
             LOG.error("Error parsing message: {}", e.getMessage(), e);
             // Output to unknown for error cases
             KinesisMessage errorMessage = new KinesisMessage();
-            errorMessage.setMessageType("PARSE_ERROR");
+            errorMessage.setMessageType(MSG_TYPE_PARSE_ERROR);
             errorMessage.setMetadata("Error: " + e.getMessage());
             ctx.output(UNKNOWN_TAG, errorMessage);
         }

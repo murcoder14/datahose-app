@@ -9,7 +9,6 @@ import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.util.Preconditions;
 
 import org.apache.avro.generic.GenericRecord;
-import org.apache.avro.specific.SpecificRecord;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.flink.CatalogLoader;
 import org.apache.iceberg.flink.FlinkSchemaUtil;
@@ -205,12 +204,9 @@ public class IcebergSinkBuilder {
         switch (icebergOperation) {
             case "upsert":
                 // If operation is "upsert" we need to set up the equality fields
-                return flinkSinkBuilder
-                        .equalityFieldColumns(equalityFieldsList)
-                        .upsert(true);
+                return flinkSinkBuilder.equalityFieldColumns(equalityFieldsList).upsert(true);
             case "overwrite":
-                return flinkSinkBuilder
-                        .overwrite(true);
+                return flinkSinkBuilder.overwrite(true);
             default:
                 return flinkSinkBuilder; // append is default
         }
