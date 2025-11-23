@@ -167,15 +167,7 @@ aws sts get-caller-identity
 # Clone repository
 git clone <your-repo-url>
 cd datahose-app
-
-# Load environment variables
-source ./setup-env.sh
 ```
-
-The `setup-env.sh` script:
-- Initializes SDKMAN and sets Java 11
-- Loads Flink configuration from `/tmp/flink-config.env` (created by `iac_create.sh`)
-- Sets AWS region
 
 ### Step 4: Build the Application
 
@@ -190,7 +182,7 @@ mvn clean compile
 mvn package -DskipTests
 
 # Verify JAR size (~221 MB)
-ls -lh target/datahose-app-1.0-SNAPSHOT.jar
+ls -lh target/datahose-app.jar
 ```
 
 **Maven Build Process:**
@@ -211,35 +203,22 @@ ls -lh target/datahose-app-1.0-SNAPSHOT.jar
 
 ## Running the Application
 
-### Local Testing (IDE)
+### Local Testing 
 
 **Option 1: Run from IntelliJ IDEA**
 
-1. Open project in IntelliJ
-2. Set VM options in Run Configuration:
-   ```
-   -Daws.region=us-east-2
-   ```
-3. Set environment variables:
-   ```
-   KINESIS_STREAM_ARN=<your-stream-arn>
-   DEFAULT_OUTPUT_BUCKET=<your-bucket>
-   ICEBERG_WAREHOUSE_BUCKET=<your-iceberg-bucket>
-   GLUE_DATABASE_NAME=tm_data_lake
-   ```
-4. Run `StreamingApp.main()`
+This is yet to be completed as it requires a local Maven profile.
 
 **Option 2: Run from Command Line**
 
 ```bash
-# Requires local Flink cluster
-flink run -c org.muralis.datahose.StreamingApp \
-  target/datahose-app-1.0-SNAPSHOT.jar
+# Requires a Flink cluster and AWS LocalStack in Docker
+flink run -c org.muralis.datahose.StreamingApp target/datahose-app.jar
 ```
 
 ### AWS Deployment
 
-See dedicated guides:
+See dedicated guides for an in-depth exploration.
 - **Infrastructure:** [AWS_IaC.md](./AWS_IaC.md) - Create/destroy AWS resources
 - **CI/CD:** [AWS_CICD.md](./AWS_CICD.md) - Build and deploy application
 
@@ -253,11 +232,11 @@ source /tmp/flink-config.env
 # 2. Build and deploy
 ./cicd.sh
 
-# 3. Verify deployment
-./verify.sh
-
-# 4. Send test data
+# 3. Send test data
 ./test.sh
+
+# 4. Destory
+./iac_destroy.sh
 ```
 
 ---
@@ -708,6 +687,12 @@ aws kinesis put-record \
 ### Verify Data in Iceberg
 
 **Using Athena (SQL):**
+
+```bash
+./verify_tables.sh
+```
+
+Or manually:
 ```sql
 -- Count records
 SELECT COUNT(*) FROM tm_data_lake.claims;
@@ -732,6 +717,7 @@ LIMIT 10;
 | **Deploy Application** | `./cicd.sh` | Build JAR, upload to S3, create/update Flink app |
 | **Verify Health** | `./verify.sh` | Check all resources, app status, logs |
 | **Send Test Data** | `./test.sh` | Send sample claims and leave requests |
+| **Query Tables** | `./verify_tables.sh` | Run Athena queries, show results |
 | **Destroy Everything** | `./iac_destroy.sh` | Delete all AWS resources |
 
 ### Detailed Guides
@@ -799,7 +785,7 @@ datahose-app/
 
 - [Apache Flink Documentation](https://nightlies.apache.org/flink/flink-docs-release-1.20/)
 - [Apache Iceberg Documentation](https://iceberg.apache.org/docs/1.9.1/)
-- [Apache Avro Documentation](https://avro.apache.org/docs/1.11.3/)
+- [Apache Avro Documentation](https://avro.apache.org/docs/1.12.0/)
 - [AWS Managed Flink Developer Guide](https://docs.aws.amazon.com/managed-flink/latest/java/what-is.html)
 - [Flink Side Outputs](https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/dev/datastream/side_output/)
 - [AWS Prescriptive Guidance: Apache Iceberg on AWS](https://docs.aws.amazon.com/prescriptive-guidance/latest/apache-iceberg-on-aws/getting-started.html) - **Recommended reading for getting started with Iceberg on AWS**
